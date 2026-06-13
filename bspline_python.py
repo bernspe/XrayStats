@@ -5,6 +5,7 @@ Converted from TypeScript to Python.
 
 import numpy as np
 from scipy.interpolate import BSpline, make_interp_spline, PchipInterpolator
+from scipy.ndimage import gaussian_filter1d
 from typing import List, Tuple, Dict, Optional, Any
 from dataclasses import dataclass
 from dotmap import DotMap
@@ -13,6 +14,19 @@ Point = Tuple[float, float]
 
 spine_labels = ['C0','C1','C2','C3','C4','C5','C6','C7','T1','T2','T3','T4','T5','T6','T7','T8','T9','T10','T11','T12','L1','L2','L3','L4','L5','S1']
 spine_regions = {'CT':[0,9],'PT': [10,12],'MT':[13,18],'TL':[19,20],'LU':[21,25]}
+
+
+def smooth_nodes(nodes: List[Point], sigma: float) -> List[Point]:
+    """Gaussian smoothing of control-point (x,y) positions before B-spline fitting.
+
+    mode='nearest' clamps the signal at boundaries so endpoint nodes are pulled
+    toward their immediate neighbours rather than reflected, which is the desired
+    behaviour for stabilising endpoint tangents.
+    """
+    arr = np.array(nodes, dtype=float)
+    smoothed_x = gaussian_filter1d(arr[:, 0], sigma=sigma, mode='nearest')
+    smoothed_y = gaussian_filter1d(arr[:, 1], sigma=sigma, mode='nearest')
+    return list(zip(smoothed_x.tolist(), smoothed_y.tolist()))
 
 def interpolate_bspline(points: List[Point], num_steps: int = 10) -> List[Point]:
     """
@@ -300,6 +314,32 @@ def calculate_angle(line1: Line, line2: Line) -> int:
         angle = 180 - angle
     
     return int(np.floor(angle))
+
+
+def find_tangent_extrema_indices(tangent_angles: List[float], smoothing_window: int = 15) -> List[int]:
+    """Find both local maxima and minima of tangent angles (Richtungswechsel).
+
+    Applies a running-average smoothing before peak detection to suppress
+    numerical noise from the dense spline discretisation.
+
+    Args:
+        tangent_angles: Tangent angles at every spline point.
+        smoothing_window: Width of the running-average kernel (set to 1 to disable).
+
+    Returns:
+        Sorted list of indices where local maxima or minima occur.
+    """
+    angles = np.array(tangent_angles, dtype=float)
+    if smoothing_window > 1:
+        kernel = np.ones(smoothing_window) / smoothing_window
+        angles = np.convolve(angles, kernel, mode='same')
+    result = []
+    for i in range(1, len(angles) - 1):
+        dt1 = angles[i] - angles[i - 1]
+        dt2 = angles[i + 1] - angles[i]
+        if (dt1 > 0 and dt2 < 0) or (dt1 < 0 and dt2 > 0):
+            result.append(i)
+    return result
 
 
 def get_local_max_tan_indices_of_splines(tangent_angles: List[float]) -> List[int]:
