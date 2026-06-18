@@ -31,8 +31,11 @@ from bspline_python import (
     map_nodes_to_spline_and_keys,
     generate_COBB_angles_from_tangents,
     find_tangent_extrema_indices,
+    find_tangent_inflection_indices,
+    find_optimal_smoothing_window,
     Line,
     calculate_angle,
+    NodeItem,
     spine_labels,
     spine_regions,
 )
@@ -122,6 +125,44 @@ def reconstruct_datasets(measurements_series: pd.Series) -> list[dict]:
     return datasets
 
 
+def getSmoothedSplineAngles(xmd: dict, smooth_sigma: float) -> list[dict]:
+    """Recompute API Spline angles on Gaussian-smoothed nodes, keeping user-defined vertebra pairs."""
+    if not isinstance(xmd, dict) or not xmd.get("stateObject", {}).get("nodes"):
+        return []
+    spline_angles = [a for a in xmd.get("angles", []) if a.get("cobbType") == "Spline"]
+    if not spline_angles:
+        return []
+    nodes_raw = xmd["stateObject"]["nodes"]
+    nodes = smooth_nodes([(n["x"], n["y"]) for n in nodes_raw], sigma=smooth_sigma)
+    vr = xmd["stateObject"].get("vertebra_range", [0, 0])
+    selected_vertebra = spine_labels[vr[0]: vr[1] + 1]
+    spline = interpolate_bspline(nodes)
+    if len(spline) < 3:
+        return []
+    mapped = map_nodes_to_spline_and_keys(
+        [NodeItem(x=x, y=y) for x, y in nodes], selected_vertebra, spline
+    )
+    lbl_to_idx = {m.label: m.spline_idx for m in mapped}
+    result = []
+    for a in spline_angles:
+        ca = a.get("cobbAngle", {})
+        vu, vl = ca.get("vertebra_upper"), ca.get("vertebra_lower")
+        if vu not in lbl_to_idx or vl not in lbl_to_idx:
+            continue
+        perps = get_perpendicular_lines_at_indices(
+            spline, length=20, indices=[lbl_to_idx[vu], lbl_to_idx[vl]]
+        )
+        if len(perps) < 2:
+            continue
+        l1 = Line(x1=perps[0]["x1"], y1=perps[0]["y1"], x2=perps[0]["x2"], y2=perps[0]["y2"])
+        l2 = Line(x1=perps[1]["x1"], y1=perps[1]["y1"], x2=perps[1]["x2"], y2=perps[1]["y2"])
+        result.append({
+            "cobbType": "Spline",
+            "cobbAngle": {"angle": calculate_angle(l1, l2), "vertebra_upper": vu, "vertebra_lower": vl},
+        })
+    return result
+
+
 def getReconstructedCobbAngles(xmd: dict, smooth_sigma: float = 0.0) -> list[dict]:
     """Reconstruct Cobb angles from raw stateObject nodes via B-Spline + perpendicular lines.
 
@@ -169,15 +210,19 @@ def getReconstructedCobbAngles(xmd: dict, smooth_sigma: float = 0.0) -> list[dic
 
 
 def getInflectionCobbAngles(xmd: dict, min_angle: float = 5.0, smooth_sigma: float = 0.0) -> list[dict]:
-    """Cobb angles at spline inflection points using node-level tangent extrema.
+    """Cobb angles at true spline inflection points (zero crossings of tangent angle).
 
-    Node-level tangents (8-10 pts) detect Richtungswechsel without smoothing;
-    perpendicular lines are still computed on the dense spline for accuracy.
-    Angles below min_angle degrees are discarded; survivors are re-ranked so
-    'inflection_r0' is always the first clinically significant angle from the top.
+    Measurement boundaries are placed where the tangent angle changes sign, i.e. where
+    the spine transitions from one curve direction to the other.  Each segment therefore
+    spans one complete scoliosis curve.
+
+    This is different from placing boundaries at tangent-angle extrema (apex vertebrae),
+    which would bisect a curve and produce clinically meaningless sub-segments.
 
     smooth_sigma > 0 applies Gaussian smoothing to nodes before spline fitting.
-    cobbType = 'inflection_r0', 'inflection_r1', … (rank after min_angle filter)
+    Angles below min_angle degrees are discarded; survivors are re-ranked so
+    'inflection_r0' is always the first clinically significant angle from the top.
+    cobbType = 'inflection_r0', 'inflection_r1', …
     vertebra_upper/lower: nearest mapped vertebra label for display.
     """
     if not isinstance(xmd, dict) or not xmd.get("stateObject", {}).get("nodes"):
@@ -202,12 +247,12 @@ def getInflectionCobbAngles(xmd: dict, min_angle: float = 5.0, smooth_sigma: flo
 
     node_spline_indices = [m.spline_idx for m in mapped]
 
-    # Detect inflection points from node-level tangents (no smoothing needed)
+    # Adaptive extrema: find the minimum smoothing window that keeps ≤2 extrema
     node_tangents = calculate_tangents(nodes, [], length=50)
     node_angles = [t.angle for t in node_tangents]
-    extrema_node_idx = find_tangent_extrema_indices(node_angles, smoothing_window=1)
+    opt_window = find_optimal_smoothing_window(node_angles, target_max_extrema=2)
+    extrema_node_idx = find_tangent_extrema_indices(node_angles, smoothing_window=opt_window)
 
-    # Map node-level extrema to exact dense-spline positions
     extrema_spline = [
         node_spline_indices[ni]
         for ni in extrema_node_idx
@@ -289,9 +334,11 @@ def get_inflection_overlay_data(xmd: dict, min_angle: float = 10.0, smooth_sigma
 
     node_spline_indices = [m.spline_idx for m in mapped]
 
+    # Adaptive extrema: find the minimum smoothing window that keeps ≤2 extrema
     node_tangents = calculate_tangents(nodes, [], length=50)
     node_angles = [t.angle for t in node_tangents]
-    extrema_node_idx = find_tangent_extrema_indices(node_angles, smoothing_window=1)
+    opt_window = find_optimal_smoothing_window(node_angles, target_max_extrema=2)
+    extrema_node_idx = find_tangent_extrema_indices(node_angles, smoothing_window=opt_window)
 
     extrema_spline = [
         node_spline_indices[ni]
@@ -586,7 +633,12 @@ def build_angles_df(
         xmd = row["xray_measurement_data"]
         if not isinstance(xmd, dict):
             continue
-        all_angles = list(xmd.get("angles", []))
+        api_angles = xmd.get("angles", [])
+        if smooth_sigma > 0.0:
+            all_angles = [a for a in api_angles if a.get("cobbType") != "Spline"]
+            all_angles += getSmoothedSplineAngles(xmd, smooth_sigma)
+        else:
+            all_angles = list(api_angles)
         if include_reconstructed:
             all_angles += getReconstructedCobbAngles(xmd, smooth_sigma=smooth_sigma)
         if include_inflection:

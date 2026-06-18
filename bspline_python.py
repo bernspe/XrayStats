@@ -316,6 +316,55 @@ def calculate_angle(line1: Line, line2: Line) -> int:
     return int(np.floor(angle))
 
 
+def find_optimal_smoothing_window(tangent_angles: List[float], target_max_extrema: int = 2) -> int:
+    """Find the minimum smoothing window that produces at most target_max_extrema extrema.
+
+    Sweeps window sizes from 1 upward and returns the first window at which
+    find_tangent_extrema_indices yields ≤ target_max_extrema results.  This
+    automatically adapts to the noise level of each measurement: noisy C-curves
+    receive a large window, clean S-curves keep window=1.
+
+    Args:
+        tangent_angles: Node-level tangent angles (typically 8–12 values).
+        target_max_extrema: Maximum acceptable extrema count (default 2 covers
+            both C-curves and S-curves; raise to 3 for triple-curve spines).
+
+    Returns:
+        Optimal smoothing window (≥ 1).
+    """
+    for w in range(1, len(tangent_angles)):
+        if len(find_tangent_extrema_indices(tangent_angles, smoothing_window=w)) <= target_max_extrema:
+            return w
+    return max(1, len(tangent_angles) // 3)
+
+
+def find_tangent_inflection_indices(tangent_angles: List[float], smoothing_window: int = 1) -> List[int]:
+    """Find indices where the tangent angle changes sign (true geometric inflection points).
+
+    Zero crossings of the tangent angle mark where the spine transitions from one curve
+    direction to the other. Unlike find_tangent_extrema_indices, which finds apex vertebrae.
+
+    Args:
+        tangent_angles: Tangent angles at node or spline points.
+        smoothing_window: Running-average kernel width (use >1 for very noisy data).
+
+    Returns:
+        Sorted list of indices closest to each zero crossing.
+    """
+    angles = np.array(tangent_angles, dtype=float)
+    if smoothing_window > 1:
+        kernel = np.ones(smoothing_window) / smoothing_window
+        angles = np.convolve(angles, kernel, mode='same')
+
+    result = []
+    for i in range(len(angles) - 1):
+        if angles[i] * angles[i + 1] < 0:  # sign change between consecutive samples
+            # Pick the sample closer to zero
+            result.append(i if abs(angles[i]) <= abs(angles[i + 1]) else i + 1)
+
+    return sorted(set(result))
+
+
 def find_tangent_extrema_indices(tangent_angles: List[float], smoothing_window: int = 15) -> List[int]:
     """Find both local maxima and minima of tangent angles (Richtungswechsel).
 
