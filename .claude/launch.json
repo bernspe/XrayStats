@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "subluxation_app",
+      "runtimeExecutable": "/Users/peterbernstein/Python/ICFXStats/venv/bin/streamlit",
+      "runtimeArgs": ["run", "subluxation_app.py", "--server.headless", "true", "--server.port", "8765"],
+      "port": 8765,
+      "autoPort": false
+    }
+  ]
+}

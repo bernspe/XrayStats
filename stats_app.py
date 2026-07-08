@@ -14,7 +14,11 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from annotation_analysis import compute_icc, build_angles_df
+from annotation_analysis import (
+    compute_icc, build_angles_df,
+    compute_icc_by_segment,
+    REGIONAL_COBB_TYPES, SEGMENTAL_COBB_TYPES, LUMBAR_SEGMENT_PAIRS,
+)
 from bspline_python import convertMeasurementBorderToSpineRegion
 
 DATA_DIR = "data"
@@ -23,10 +27,11 @@ DIMS = {
     "cobbType":    "Cobb-Typ",
     "img_type":    "Bildtyp",
     "rater_name":  "User/Rater",
-    "main_region": "Hauptregion (CT/PT/MT/TL/LU)",
+    "main_region": "Hauptregion (CT/PT/MT/TL/U-LU/L-LU)",
 }
-ICC_BREAKDOWN_OPTIONS = {"(keine)": None, "Bildtyp": "img_type", "Hauptregion": "main_region"}
+ICC_BREAKDOWN_OPTIONS = {"(keine)": None, "Bildtyp": "img_type"}
 SIGMA_OPTIONS = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+REGION_ORDER = ["CT", "PT", "MT", "TL", "U-LU", "L-LU", "LU"]
 COMPARE_COBBS = ["Cobb-regional", "Cobb-segmental", "Spline", "reconstructed_regional", "reconstructed_segmental"]
 
 
@@ -117,17 +122,39 @@ def make_boxplot(df: pd.DataFrame, x_var: str, hue_var: str | None) -> plt.Figur
 # ── ICC ───────────────────────────────────────────────────────────────────────
 
 def compute_icc_table(df: pd.DataFrame, breakdown_col: str | None) -> pd.DataFrame:
-    """ICC(2,1) + medianer Inter-Rater-Std pro cobbType, optional nach breakdown_col."""
+    """ICC(2,1) + medianer Inter-Rater-Std pro (cobbType, Region), optional nach breakdown_col.
+
+    Aggregiert zuerst auf max pro (image, rater, cobbType, Region), damit Rater mit
+    mehreren Winkeln in derselben Region exakt eine Beobachtung pro Zelle liefern.
+    """
+    agg = (
+        df.dropna(subset=["angle", "main_region"])
+        .groupby(["image_id", "img_type", "rater_name", "cobbType", "main_region"],
+                 as_index=False)["angle"].max()
+    )
+    # Synthetic LU = max(U-LU, L-LU) per rater/image/cobbType
+    lu = (
+        agg[agg["main_region"].isin({"U-LU", "L-LU"})]
+        .groupby(["image_id", "img_type", "rater_name", "cobbType"], as_index=False)["angle"].max()
+    )
+    lu["main_region"] = "LU"
+    agg = pd.concat([agg, lu], ignore_index=True)
+    group_keys = ["cobbType", "main_region"] + ([breakdown_col] if breakdown_col else [])
     rows = []
-    group_keys = ["cobbType"] + ([breakdown_col] if breakdown_col else [])
-    for keys, sub in df.groupby(group_keys):
-        keys = (keys,) if isinstance(keys, str) else keys
+    for keys, sub in agg.groupby(group_keys):
+        keys = (keys,) if isinstance(keys, str) else tuple(keys)
         res = compute_icc(sub, "image_id", "rater_name", "angle")
         res["median_std"] = round(sub.groupby("image_id")["angle"].std().median(), 2)
         row = dict(zip(group_keys, keys))
         row.update(res)
         rows.append(row)
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows)
+    _rank = {r: i for i, r in enumerate(REGION_ORDER)}
+    result["_r"] = result["main_region"].map(_rank).fillna(len(REGION_ORDER))
+    return result.sort_values(["cobbType", "_r"]).drop(columns=["_r"]).reset_index(drop=True)
+
+
+SEGMENT_ORDER = ["T12/L1", "L1/L2", "L2/L3", "L3/L4", "L4/L5", "L5/S1"]
 
 
 def _icc_color(val: float) -> str:
@@ -138,6 +165,82 @@ def _icc_color(val: float) -> str:
     if val >= 0.50:
         return "color: #f39c12; font-weight:600"
     return "color: #e74c3c; font-weight:600"
+
+
+def make_icc_chart(
+    icc_df: pd.DataFrame,
+    x_col: str,
+    x_order: list[str],
+) -> plt.Figure:
+    """Gruppenbalken: ICC (links) + Median-Std-Marker (rechts) pro Region/Segment.
+
+    Ein Subplot pro img_type, Farbe = cobbType.
+    Fehlende Werte erzeugen keinen Balken (statt versteckter Punkte).
+    """
+    img_types = sorted(icc_df["img_type"].dropna().unique()) if "img_type" in icc_df.columns else ["–"]
+    cobb_types = sorted(icc_df["cobbType"].dropna().unique())
+    n_ct = len(cobb_types)
+    bar_w = 0.8 / max(n_ct, 1)
+    colors = plt.cm.tab10.colors
+    cmap = {ct: colors[i % len(colors)] for i, ct in enumerate(cobb_types)}
+
+    n = len(img_types)
+    fig, axes = plt.subplots(1, n, figsize=(max(5, n * 5.5), 4.5), sharey=False)
+    if n == 1:
+        axes = [axes]
+
+    for ax, img_type in zip(axes, img_types):
+        sub = icc_df[icc_df["img_type"] == img_type] if "img_type" in icc_df.columns else icc_df
+        xs_present = [x for x in x_order if x in sub[x_col].values]
+        if not xs_present:
+            ax.set_title(img_type, fontweight="bold")
+            ax.text(0.5, 0.5, "keine Daten", ha="center", va="center", transform=ax.transAxes)
+            continue
+
+        ax2 = ax.twinx()
+        legend_added: set[str] = set()
+
+        for j, ct in enumerate(cobb_types):
+            ct_sub = sub[sub["cobbType"] == ct].set_index(x_col).reindex(xs_present)
+            color = cmap[ct]
+            offset = (j - n_ct / 2 + 0.5) * bar_w
+
+            for i, x in enumerate(xs_present):
+                icc_val = ct_sub.at[x, "ICC"] if x in ct_sub.index else np.nan
+                std_val = (ct_sub.at[x, "median_std"]
+                           if "median_std" in ct_sub.columns and x in ct_sub.index
+                           else np.nan)
+                pos = i + offset
+                if not (isinstance(icc_val, float) and np.isnan(icc_val)):
+                    lbl = ct if ct not in legend_added else ""
+                    ax.bar(pos, icc_val, width=bar_w * 0.9, color=color,
+                           alpha=0.82, label=lbl, zorder=3)
+                    legend_added.add(ct)
+                if not (isinstance(std_val, float) and np.isnan(std_val)):
+                    ax2.plot(pos, std_val, "D", color=color,
+                             markersize=8, alpha=0.85, zorder=4,
+                             markeredgecolor="black", markeredgewidth=0.8)
+
+        ax.set_xticks(range(len(xs_present)))
+        ax.set_xticklabels(xs_present, rotation=35, ha="right", fontsize=9)
+        ax.set_ylim(0, 1.05)
+        ax.axhline(0.75, color="#aaa", linestyle=":", linewidth=1)
+        ax.axhline(0.50, color="#aaa", linestyle=":", linewidth=1)
+        ax.set_ylabel("ICC(2,1)", fontsize=9)
+        ax2.set_ylabel("Median Std (°)", fontsize=9, color="#888")
+        ax2.tick_params(axis="y", labelcolor="#888")
+        ax.set_title(img_type, fontweight="bold")
+        ax.grid(axis="y", alpha=0.15, zorder=0)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, title="cobbType", loc="upper center",
+                   bbox_to_anchor=(0.5, 1.12), ncol=min(len(labels), 4),
+                   fontsize=8, framealpha=0.9)
+    fig.text(0.5, -0.03, "█  ICC(2,1) (links)   ◆  Median Std° (rechts)",
+             ha="center", fontsize=8, color="#666")
+    plt.tight_layout()
+    return fig
 
 
 # ── Korrelation ───────────────────────────────────────────────────────────────
@@ -207,24 +310,142 @@ def make_sigma_boxplot(dfs: dict, cobbs: list) -> plt.Figure:
 
 
 def make_sigma_icc(dfs: dict, cobbs: list) -> pd.DataFrame:
-    """ICC + Median-Std pro cobbType × σ als Vergleichstabelle."""
+    """ICC pro (σ, cobbType, Region/Segment) — konsistent mit dem ICC-Tab.
+
+    Regional: compute_icc_table (max pro Region, ICC pro Region).
+    Segmental: compute_icc_by_segment (ICC pro Lumbar-Segment-Paar).
+    Kein Pooling über Regionen/Segmente — vermeidet den Vergleich verschiedener Bereiche.
+    """
     rows = []
+    reg_cobbs = [ct for ct in cobbs if ct in REGIONAL_COBB_TYPES]
+    seg_cobbs = [ct for ct in cobbs if ct in SEGMENTAL_COBB_TYPES]
+
     for sigma, df in sorted(dfs.items()):
-        sub = df[df["cobbType"].isin(cobbs)]
-        for ct, grp in sub.groupby("cobbType"):
-            res = compute_icc(grp, "image_id", "rater_name", "angle")
-            rows.append({
-                "σ": sigma,
-                "cobbType": ct,
-                "ICC": round(res["ICC"], 3) if not np.isnan(res["ICC"]) else np.nan,
-                "CI95 [untere, obere]": (
-                    f"[{res['CI95_lower']:.3f}, {res['CI95_upper']:.3f}]"
-                    if not np.isnan(res["CI95_lower"]) else "—"
-                ),
-                "Median Std (°)": round(grp.groupby("image_id")["angle"].std().median(), 2),
-                "n Bilder": res["n"],
-            })
+        if reg_cobbs:
+            icc_reg = compute_icc_table(df[df["cobbType"].isin(reg_cobbs)],
+                                        breakdown_col="img_type")
+            for _, r in icc_reg.dropna(subset=["ICC"]).iterrows():
+                rows.append({
+                    "σ": sigma,
+                    "img_type": r.get("img_type", ""),
+                    "cobbType": r["cobbType"],
+                    "Bereich": r["main_region"],
+                    "ICC": round(r["ICC"], 3),
+                    "CI95 [untere, obere]": (
+                        f"[{r['CI95_lower']:.3f}, {r['CI95_upper']:.3f}]"
+                        if not np.isnan(r["CI95_lower"]) else "—"
+                    ),
+                    "Median Std (°)": r["median_std"],
+                    "n Bilder": r["n"],
+                })
+
+        if seg_cobbs:
+            seg_df = df[
+                df["cobbType"].isin(seg_cobbs) &
+                df.apply(
+                    lambda r: (r["vertebra_upper"], r["vertebra_lower"]) in LUMBAR_SEGMENT_PAIRS,
+                    axis=1,
+                )
+            ]
+            active_img_types = seg_df["img_type"].dropna().unique().tolist()
+            if active_img_types:
+                icc_seg = compute_icc_by_segment(seg_df, seg_cobbs, active_img_types)
+                for _, r in icc_seg.dropna(subset=["ICC"]).iterrows():
+                    rows.append({
+                        "σ": sigma,
+                        "img_type": r.get("img_type", ""),
+                        "cobbType": r["cobbType"],
+                        "Bereich": f"{r['vertebra_upper']}/{r['vertebra_lower']}",
+                        "ICC": round(r["ICC"], 3),
+                        "CI95 [untere, obere]": (
+                            f"[{r['CI95_lower']:.3f}, {r['CI95_upper']:.3f}]"
+                            if not np.isnan(r["CI95_lower"]) else "—"
+                        ),
+                        "Median Std (°)": r["median_std"],
+                        "n Bilder": r["n"],
+                    })
+
     return pd.DataFrame(rows)
+
+
+def make_sigma_icc_chart(
+    icc_df: pd.DataFrame,
+    x_order: list[str],
+    x_label: str,
+) -> plt.Figure:
+    """3D-Balkendiagramm: X = Region/Segment, Y = σ, Z = ICC, Farbe = cobbType.
+
+    Ein Subplot pro img_type. Erweiterung des ICC-Panel-Charts um die σ-Dimension.
+    """
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+    img_types = sorted(icc_df["img_type"].dropna().unique()) if "img_type" in icc_df.columns else ["–"]
+    cobb_types = sorted(icc_df["cobbType"].dropna().unique())
+    sigma_vals = sorted(icc_df["σ"].unique())
+    n_ct = len(cobb_types)
+    dx = 0.8 / max(n_ct, 1)   # bar width along x (region axis)
+    dy = 0.55                   # bar depth along y (sigma axis)
+
+    colors = plt.cm.tab10.colors
+    cmap = {ct: colors[i % len(colors)] for i, ct in enumerate(cobb_types)}
+
+    n = len(img_types)
+    fig = plt.figure(figsize=(max(7, n * 7), 5.5))
+
+    for idx, img_type in enumerate(img_types):
+        ax = fig.add_subplot(1, n, idx + 1, projection="3d")
+        sub = icc_df[icc_df["img_type"] == img_type] if "img_type" in icc_df.columns else icc_df
+        xs_present = [x for x in x_order if x in sub["Bereich"].values]
+        if not xs_present:
+            ax.set_title(img_type, fontweight="bold")
+            continue
+
+        legend_added: set[str] = set()
+        for j, ct in enumerate(cobb_types):
+            ct_sub = sub[sub["cobbType"] == ct]
+            color = cmap[ct]
+            offset = (j - n_ct / 2 + 0.5) * dx
+            for xi, x in enumerate(xs_present):
+                for yi, sigma in enumerate(sigma_vals):
+                    row = ct_sub[(ct_sub["Bereich"] == x) & (ct_sub["σ"] == sigma)]
+                    if row.empty:
+                        continue
+                    icc_val = row.iloc[0]["ICC"]
+                    if np.isnan(icc_val):
+                        continue
+                    lbl = ct if ct not in legend_added else ""
+                    ax.bar3d(
+                        xi + offset - dx * 0.45,  # x base
+                        yi - dy / 2,              # y base
+                        0,                        # z base
+                        dx * 0.9, dy, icc_val,
+                        color=color, alpha=0.80, label=lbl, zsort="average",
+                    )
+                    legend_added.add(ct)
+
+        # Reference planes at ICC = 0.75 and 0.50
+        xg, yg = np.meshgrid([-0.6, len(xs_present) - 0.4], [-0.6, len(sigma_vals) - 0.4])
+        for ref, col in [(0.75, "#2ecc71"), (0.50, "#f39c12")]:
+            ax.plot_surface(xg, yg, np.full_like(xg, ref),
+                            alpha=0.10, color=col, zorder=0)
+
+        ax.set_xticks(range(len(xs_present)))
+        ax.set_xticklabels(xs_present, rotation=18, ha="right", fontsize=7)
+        ax.set_yticks(range(len(sigma_vals)))
+        ax.set_yticklabels([f"σ={s}" for s in sigma_vals], fontsize=7)
+        ax.set_zlim(0, 1.05)
+        ax.set_zlabel("ICC(2,1)", fontsize=8, labelpad=6)
+        ax.set_xlabel(x_label, fontsize=8, labelpad=8)
+        ax.set_ylabel("Gauss-σ", fontsize=8, labelpad=8)
+        ax.set_title(img_type, fontweight="bold")
+        ax.view_init(elev=22, azim=-50)
+
+    handles = [plt.Rectangle((0, 0), 1, 1, fc=cmap[ct], alpha=0.80) for ct in cobb_types]
+    fig.legend(handles, cobb_types, title="cobbType", loc="upper center",
+               bbox_to_anchor=(0.5, 1.06), ncol=min(len(cobb_types), 4),
+               fontsize=8, framealpha=0.9)
+    plt.tight_layout()
+    return fig
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -351,9 +572,8 @@ def main():
 
     # ── Tab 2: ICC ────────────────────────────────────────────────────────────
     with tab_icc:
-        st.subheader("ICC(2,1) zwischen Ratern — pro Cobb-Typ")
         st.caption(
-            "Zwei-Wege-ANOVA ICC für unbalancierte Designs (Shrout & Fleiss 1979). "
+            "ICC(2,1) · Zwei-Wege-ANOVA für unbalancierte Designs (Shrout & Fleiss 1979). "
             "Grün ≥ 0.75 · Gelb ≥ 0.50 · Rot < 0.50"
         )
         breakdown_label = st.selectbox(
@@ -364,28 +584,106 @@ def main():
         )
         breakdown_col = ICC_BREAKDOWN_OPTIONS[breakdown_label]
 
-        with st.spinner("ICC berechnen …"):
-            icc_df = compute_icc_table(filtered, breakdown_col)
+        def _icc_display(df: pd.DataFrame) -> pd.DataFrame:
+            d = df.dropna(subset=["ICC"]).rename(columns={
+                "main_region": "Region",
+                "vertebra_upper": "Oben", "vertebra_lower": "Unten",
+                "CI95_lower": "CI95 untere", "CI95_upper": "CI95 obere",
+                "n": "n Bilder", "median_std": "Median Std (°)",
+            })
+            for col in ["ICC", "CI95 untere", "CI95 obere"]:
+                if col in d.columns:
+                    d[col] = d[col].round(3)
+            return d
 
-        icc_display = icc_df.rename(columns={
-            "ICC": "ICC", "CI95_lower": "CI95 untere", "CI95_upper": "CI95 obere",
-            "n": "n Bilder", "median_std": "Median Std (°)",
-        })
-        for col in ["ICC", "CI95 untere", "CI95 obere"]:
-            icc_display[col] = icc_display[col].round(3)
+        # ── Regional ─────────────────────────────────────────────────────────
+        reg_filtered = filtered[filtered["cobbType"].isin(REGIONAL_COBB_TYPES)]
+        if not reg_filtered.empty:
+            st.subheader("Regional")
+            st.caption(
+                "Verglichene Typen: **Cobb-regional**, **Spline**, **reconstructed_regional**. "
+                "Aggregation: max-Winkel pro (Rater · Bild · Spine-Region) vor ICC."
+            )
+            with st.spinner("Regional ICC berechnen …"):
+                icc_reg = compute_icc_table(reg_filtered, breakdown_col)
+                # Chart always per img_type regardless of table breakdown
+                icc_reg_chart = (icc_reg if breakdown_col == "img_type"
+                                 else compute_icc_table(reg_filtered, "img_type"))
 
-        st.dataframe(
-            icc_display.style.map(_icc_color, subset=["ICC"]),
-            use_container_width=True,
-            hide_index=True,
-        )
-        st.download_button(
-            "⬇ ICC-Tabelle als CSV",
-            data=icc_display.to_csv(index=False).encode(),
-            file_name="cobb_icc.csv",
-            mime="text/csv",
-            key="dl_icc",
-        )
+            lu_regions = [r for r in ["U-LU", "L-LU", "LU"]
+                          if r in icc_reg_chart["main_region"].values]
+            sel_lu = st.multiselect(
+                "Lumbar-Regionen einblenden",
+                options=lu_regions,
+                default=lu_regions,
+                key="icc_lu_regions",
+            )
+            non_lu = [r for r in REGION_ORDER if r not in {"U-LU", "L-LU", "LU"}]
+            chart_regions = non_lu + sel_lu  # preserves spine order
+            chart_df = icc_reg_chart[icc_reg_chart["main_region"].isin(chart_regions)]
+            fig = make_icc_chart(chart_df, "main_region", chart_regions)
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
+            st.pyplot(fig, use_container_width=True)
+            st.download_button("⬇ Regional ICC Chart als PNG", data=buf.getvalue(),
+                               file_name="icc_regional_chart.png", mime="image/png",
+                               key="dl_icc_reg_chart")
+            plt.close(fig)
+
+            st.divider()
+            d = _icc_display(icc_reg)
+            st.dataframe(d.style.map(_icc_color, subset=["ICC"]),
+                         use_container_width=True, hide_index=True)
+            st.download_button("⬇ Regional ICC als CSV",
+                               data=d.to_csv(index=False).encode(),
+                               file_name="icc_regional.csv", mime="text/csv",
+                               key="dl_icc_reg")
+
+        # ── Segmental ─────────────────────────────────────────────────────────
+        seg_filtered = filtered[
+            filtered["cobbType"].isin(SEGMENTAL_COBB_TYPES) &
+            filtered.apply(
+                lambda r: (r["vertebra_upper"], r["vertebra_lower"]) in LUMBAR_SEGMENT_PAIRS,
+                axis=1,
+            )
+        ]
+        if not seg_filtered.empty:
+            st.subheader("Segmental")
+            st.caption(
+                "Verglichene Typen: **Cobb-segmental**, **reconstructed_segmental**. "
+                "Gruppierung nach exaktem Vertebra-Paar (z.B. L1/L2) — keine Region-Aggregation."
+            )
+            active_img_types = seg_filtered["img_type"].dropna().unique().tolist()
+            seg_cobb_types = [ct for ct in SEGMENTAL_COBB_TYPES
+                              if ct in seg_filtered["cobbType"].unique()]
+            with st.spinner("Segmental ICC berechnen …"):
+                icc_seg = compute_icc_by_segment(seg_filtered, seg_cobb_types, active_img_types)
+            if breakdown_col and breakdown_col in icc_seg.columns:
+                icc_seg = icc_seg[icc_seg[breakdown_col].isin(filtered[breakdown_col].unique())]
+
+            icc_seg_chart = icc_seg.copy()
+            icc_seg_chart["segment"] = (icc_seg_chart["vertebra_upper"] + "/"
+                                        + icc_seg_chart["vertebra_lower"])
+            fig = make_icc_chart(icc_seg_chart, "segment", SEGMENT_ORDER)
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
+            st.pyplot(fig, use_container_width=True)
+            st.download_button("⬇ Segmental ICC Chart als PNG", data=buf.getvalue(),
+                               file_name="icc_segmental_chart.png", mime="image/png",
+                               key="dl_icc_seg_chart")
+            plt.close(fig)
+
+            st.divider()
+            d = _icc_display(icc_seg)
+            st.dataframe(d.style.map(_icc_color, subset=["ICC"]),
+                         use_container_width=True, hide_index=True)
+            st.download_button("⬇ Segmental ICC als CSV",
+                               data=d.to_csv(index=False).encode(),
+                               file_name="icc_segmental.csv", mime="text/csv",
+                               key="dl_icc_seg")
+
+        if reg_filtered.empty and seg_filtered.empty:
+            st.info("Keine regionalen oder segmentalen cobbTypes im aktuellen Filter.")
 
     # ── Tab 3: Korrelation ────────────────────────────────────────────────────
     with tab_corr:
@@ -498,6 +796,20 @@ def main():
             st.subheader("ICC nach σ")
             with st.spinner("ICC berechnen …"):
                 icc_sigma = make_sigma_icc(sigma_dfs, compare_cobbs)
+
+            reg_mask = icc_sigma["Bereich"].isin(REGION_ORDER)
+            icc_reg = icc_sigma[reg_mask]
+            icc_seg = icc_sigma[~reg_mask]
+
+            if not icc_reg.empty:
+                fig_reg = make_sigma_icc_chart(icc_reg, REGION_ORDER, "Region")
+                st.pyplot(fig_reg, use_container_width=True)
+                plt.close(fig_reg)
+
+            if not icc_seg.empty:
+                fig_seg = make_sigma_icc_chart(icc_seg, SEGMENT_ORDER, "Segment")
+                st.pyplot(fig_seg, use_container_width=True)
+                plt.close(fig_seg)
 
             st.dataframe(
                 icc_sigma.style.map(_icc_color, subset=["ICC"]),

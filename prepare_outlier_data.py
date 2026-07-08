@@ -50,6 +50,13 @@ def fetch_data(token: str) -> pd.DataFrame:
     return df
 
 
+def fetch_img_urls(token: str) -> dict:
+    """image_id -> fresh Google-signed URL (valid 24h). Cheap re-fetch for when
+    a cached img_urls.pkl has expired, without re-running the full pipeline."""
+    df = fetch_data(token)
+    return dict(zip(df["id"], df["img"]))
+
+
 def build_pipeline(df: pd.DataFrame):
     print("Building df4d …")
     df4d = aa.build_df4d(df)
@@ -110,7 +117,8 @@ def main():
 
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    df, df4d_corrected, _ = build_pipeline(fetch_data(token))
+    df = fetch_data(token)
+    _, df4d_corrected, _ = build_pipeline(df)
 
     # Extract Google-signed image URLs (short-lived) from the raw API response.
     # df4d_corrected also carries 'img' via build_df4d, but using the raw df

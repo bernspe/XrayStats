@@ -13,7 +13,7 @@ from dotmap import DotMap
 Point = Tuple[float, float]
 
 spine_labels = ['C0','C1','C2','C3','C4','C5','C6','C7','T1','T2','T3','T4','T5','T6','T7','T8','T9','T10','T11','T12','L1','L2','L3','L4','L5','S1']
-spine_regions = {'CT':[0,9],'PT': [10,12],'MT':[13,18],'TL':[19,20],'LU':[21,25]}
+spine_regions = {'CT':[0,9],'PT':[9,12],'MT':[12,18],'TL':[18,20],'U-LU':[20,22],'L-LU':[22,25]}
 
 
 def smooth_nodes(nodes: List[Point], sigma: float) -> List[Point]:

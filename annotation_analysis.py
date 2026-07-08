@@ -15,9 +15,12 @@ Main entry points for the notebook:
     get_inflection_overlay_data(xmd, ...)    -> dict with angles + perp_lines for visualization
 """
 
+import warnings
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
 from dotmap import DotMap
 from statsmodels.formula.api import ols
 import statsmodels.api as sm
@@ -38,6 +41,7 @@ from bspline_python import (
     NodeItem,
     spine_labels,
     spine_regions,
+    convertMeasurementBorderToSpineRegion,
 )
 
 # Pre-built mapping: vertebra label -> spine region name
@@ -46,6 +50,13 @@ for _region, (_start, _end) in spine_regions.items():
     for _i in range(_start, _end + 1):
         if _i < len(spine_labels):
             label_to_region[spine_labels[_i]] = _region
+
+# CobbType classification — drives ICC grouping strategy
+REGIONAL_COBB_TYPES: set[str] = {"Cobb-regional", "Spline", "reconstructed_regional"}
+SEGMENTAL_COBB_TYPES: set[str] = {"Cobb-segmental", "reconstructed_segmental"}
+LUMBAR_SEGMENT_PAIRS: frozenset[tuple[str, str]] = frozenset({
+    ("T12", "L1"), ("L1", "L2"), ("L2", "L3"), ("L3", "L4"), ("L4", "L5"), ("L5", "S1"),
+})
 
 
 # ---------------------------------------------------------------------------
@@ -616,6 +627,58 @@ def build_vertebra_range_df(df4d_source: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _safe_region(upper: str, lower: str) -> str | None:
+    """Wrapper around convertMeasurementBorderToSpineRegion that returns None on bad labels."""
+    try:
+        return convertMeasurementBorderToSpineRegion(upper, lower)
+    except (ValueError, Exception):
+        return None
+
+
+def aggregate_angles_by_region(angles_df: pd.DataFrame, agg: str = "max") -> pd.DataFrame:
+    """Collapse multiple angles per (image_id, rater, cobbType, region) to one value.
+
+    Needed when a rater measured sub-curves within the same spine region.
+    agg='max' keeps the dominant (largest) curve; 'sum' approximates the full-region angle.
+    """
+    return (
+        angles_df
+        .dropna(subset=["angle", "region"])
+        .groupby(["image_id", "img_type", "rater_name", "rater_id", "cobbType", "region"],
+                 as_index=False)
+        ["angle"]
+        .agg(agg)
+    )
+
+
+def compute_icc_by_region(
+    angles_df: pd.DataFrame,
+    cobb_types: list[str],
+    active_img_types: list[str],
+    agg: str = "max",
+    min_images: int = 5,
+) -> pd.DataFrame:
+    """ICC(2,1) per (img_type, cobbType, region).
+
+    Aggregates multiple angles per rater/image/region first (default: max), then
+    runs compute_icc for every (img_type, cobbType, region) combination.
+
+    Returns a long DataFrame with columns: img_type, cobbType, region, ICC, CI95_lower,
+    CI95_upper, n. Filter or pivot as needed.
+    """
+    agg_df = aggregate_angles_by_region(angles_df[angles_df["cobbType"].isin(cobb_types)], agg=agg)
+    rows = []
+    for img_type in active_img_types:
+        sub_it = agg_df[agg_df["img_type"] == img_type]
+        for cobb_type in cobb_types:
+            sub_ct = sub_it[sub_it["cobbType"] == cobb_type]
+            for region in sorted(sub_ct["region"].dropna().unique()):
+                sub = sub_ct[sub_ct["region"] == region]
+                res = compute_icc(sub, "image_id", "rater_name", "angle", min_images=min_images)
+                rows.append({"img_type": img_type, "cobbType": cobb_type, "region": region, **res})
+    return pd.DataFrame(rows)
+
+
 def build_angles_df(
     df4d_source: pd.DataFrame,
     include_reconstructed: bool = False,
@@ -653,6 +716,7 @@ def build_angles_df(
                 "cobbType": angle.get("cobbType", ""),
                 "vertebra_upper": ca.get("vertebra_upper", ""),
                 "vertebra_lower": ca.get("vertebra_lower", ""),
+                "region": _safe_region(ca.get("vertebra_upper", ""), ca.get("vertebra_lower", "")),
                 "angle": ca.get("angle", None),
             })
     return pd.DataFrame(rows)
@@ -768,6 +832,45 @@ def compute_icc_by_img_type(
     return pivot[[c for c in cobb_types if c in pivot.columns]]
 
 
+def compute_icc_by_segment(
+    angles_df: pd.DataFrame,
+    cobb_types: list[str],
+    active_img_types: list[str],
+    min_images: int = 5,
+) -> pd.DataFrame:
+    """ICC(2,1) per (img_type, cobbType, vertebra_upper, vertebra_lower).
+
+    For segmental Cobb angles each adjacent-vertebra pair (e.g. L1/L2) is the
+    comparison unit. No region aggregation — each rater has at most one angle per
+    segment per image. Returns a long DataFrame sorted by spine position.
+    """
+    _spine_idx = {lbl: i for i, lbl in enumerate(spine_labels)}
+    sub = angles_df[angles_df["cobbType"].isin(cobb_types)]
+    rows = []
+    for img_type in active_img_types:
+        sub_it = sub[sub["img_type"] == img_type]
+        for cobb_type in cobb_types:
+            sub_ct = sub_it[sub_it["cobbType"] == cobb_type]
+            for (vu, vl), grp in sub_ct.groupby(["vertebra_upper", "vertebra_lower"]):
+                res = compute_icc(grp, "image_id", "rater_name", "angle", min_images=min_images)
+                res["median_std"] = round(
+                    grp.groupby("image_id")["angle"].std().median(), 2
+                )
+                rows.append({
+                    "img_type": img_type,
+                    "cobbType": cobb_type,
+                    "vertebra_upper": vu,
+                    "vertebra_lower": vl,
+                    **res,
+                })
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        result["_u"] = result["vertebra_upper"].map(_spine_idx)
+        result["_l"] = result["vertebra_lower"].map(_spine_idx)
+        result = result.sort_values(["_u", "_l"]).drop(columns=["_u", "_l"])
+    return result
+
+
 def filter_inflection_max_common_rank(df: pd.DataFrame) -> pd.DataFrame:
     """Keep only inflection_r* rows whose rank all raters of the image share.
 
@@ -802,6 +905,7 @@ def compute_outlier_ranking(angles_df: pd.DataFrame) -> pd.DataFrame:
              n_raters, std, mean_angle.
     """
     group_cols = ["image_id", "cobbType", "vertebra_upper", "vertebra_lower"]
+    extra = {"region": ("region", "first")} if "region" in angles_df.columns else {}
     agg = (
         angles_df
         .dropna(subset=["angle"])
@@ -811,9 +915,463 @@ def compute_outlier_ranking(angles_df: pd.DataFrame) -> pd.DataFrame:
             std=("angle", "std"),
             mean_angle=("angle", "mean"),
             img_type=("img_type", "first"),
+            **extra,
         )
         .reset_index()
     )
     result = agg[agg["n_raters"] >= 2].copy()
     result["std"] = result["std"].fillna(0.0)
     return result.sort_values("std", ascending=False).reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Subluxation / vertebra-shift detection (Cobb-segmental lines)
+# ---------------------------------------------------------------------------
+
+_SPINE_IDX = {lbl: i for i, lbl in enumerate(spine_labels)}
+
+
+def build_cobb_segmental_lines_df(xmd: dict) -> pd.DataFrame:
+    """One row per vertebra endplate line, deduplicated from Cobb-segmental angles.
+
+    Each `angles` entry with cobbType == "Cobb-segmental" carries both
+    upperLine (at vertebra_upper) and lowerLine (at vertebra_lower); adjacent
+    entries share a line (this entry's lowerLine == the next entry's
+    upperLine), so lines are collected into a dict keyed by vertebra label.
+
+    Position (midpoint), orientation (angle mod 180°, folded into (-90, 90]),
+    and length are all invariant to which endpoint is x1/x2 — this absorbs an
+    accidental left/right endpoint swap during annotation without special-casing it.
+    """
+    lines: dict[str, dict] = {}
+    for a in xmd.get("angles", []):
+        if a.get("cobbType") != "Cobb-segmental":
+            continue
+        ca = a.get("cobbAngle", {})
+        for label_key, line_key in (("vertebra_upper", "upperLine"), ("vertebra_lower", "lowerLine")):
+            label = ca.get(label_key)
+            line = a.get(line_key)
+            if label and line and label not in lines:
+                lines[label] = line
+
+    rows = []
+    for label, line in lines.items():
+        dx = line["x2"] - line["x1"]
+        dy = line["y2"] - line["y1"]
+        angle_deg = np.degrees(np.arctan2(dy, dx))
+        if angle_deg <= -90:
+            angle_deg += 180
+        elif angle_deg > 90:
+            angle_deg -= 180
+        rows.append({
+            "vertebra": label,
+            "spine_idx": _SPINE_IDX.get(label, -1),
+            "x1": line["x1"], "y1": line["y1"], "x2": line["x2"], "y2": line["y2"],
+            "mx": (line["x1"] + line["x2"]) / 2,
+            "my": (line["y1"] + line["y2"]) / 2,
+            "length": float(np.hypot(dx, dy)),
+            "angle_deg": float(angle_deg),
+        })
+    columns = ["vertebra", "spine_idx", "x1", "y1", "x2", "y2", "mx", "my", "length", "angle_deg"]
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows, columns=columns).sort_values("spine_idx").reset_index(drop=True)
+
+
+def _robust_poly_zresiduals(x: np.ndarray, y: np.ndarray, degree: int) -> np.ndarray:
+    """Residuals of a robust (Huber) polynomial fit, normalized by the fit's scale.
+
+    With few points and a near-perfect fit through all-but-one of them, the
+    Huber MAD scale estimate can collapse toward zero, blowing up the one real
+    residual to an absurd z-value. Floor the scale at a fraction of the data's
+    own spread (unit-agnostic — works the same for pixel and degree values).
+    """
+    x_c = (x - x.mean()) / (x.std() if x.std() > 1e-9 else 1.0)
+    design = np.vander(x_c, degree + 1)
+    model = sm.RLM(y, design, M=sm.robust.norms.HuberT()).fit()
+    y_range = y.max() - y.min()
+    floor = 0.05 * y_range if y_range > 1e-9 else 1e-3
+    scale = max(model.scale, floor)
+    return (y - model.predict(design)) / scale
+
+
+def compute_subluxation_scores(xmd: dict, degree: int = 3) -> pd.DataFrame:
+    """Per-vertebra shift/rotation/foreshortening residuals vs. a robust harmonic fit.
+
+    Fits a polynomial (degree adapted to chain length, see below) with a Huber
+    M-estimator (robust to outliers skewing the reference curve) separately to
+    midpoint-x, orientation angle, and line length, each as a function of
+    vertebra position along the spine. Residuals are z-normalized by each
+    fit's own robust scale, then combined into one euclidean severity score
+    per vertebra line.
+
+    Needs >= 4 Cobb-segmental lines (>=3 line pairs / segments). The
+    polynomial degree is capped at `n - 3` so there are always >=2 residual
+    degrees of freedom for a stable scale estimate — e.g. a 4-line chain gets
+    a linear fit (degree 1), a 7+-line chain gets the full requested degree.
+    Returns NaN scores when there are too few lines.
+    """
+    lines_df = build_cobb_segmental_lines_df(xmd)
+    n = len(lines_df)
+    if n < 4:
+        for col in ("z_pos", "z_angle", "z_length", "score"):
+            lines_df[col] = float("nan")
+        return lines_df
+
+    eff_degree = min(degree, n - 3)
+    x = lines_df["spine_idx"].to_numpy(dtype=float)
+    lines_df["z_pos"] = _robust_poly_zresiduals(x, lines_df["mx"].to_numpy(dtype=float), eff_degree)
+    lines_df["z_angle"] = _robust_poly_zresiduals(x, lines_df["angle_deg"].to_numpy(dtype=float), eff_degree)
+    lines_df["z_length"] = _robust_poly_zresiduals(x, lines_df["length"].to_numpy(dtype=float), eff_degree)
+    lines_df["score"] = np.sqrt(
+        lines_df["z_pos"] ** 2 + lines_df["z_angle"] ** 2 + lines_df["z_length"] ** 2
+    )
+    return lines_df
+
+
+def build_subluxation_segment_df(xmd: dict, degree: int = 3) -> pd.DataFrame:
+    """One row per Cobb-segmental angle with a combined shift score.
+
+    Score per segment = max(score of its upper line, score of its lower line) —
+    a segment is flagged as soon as either of its two endplate lines deviates
+    from the expected harmonic spine profile.
+    """
+    lines_df = compute_subluxation_scores(xmd, degree=degree)
+    score_by_vertebra = lines_df.set_index("vertebra")["score"]
+
+    rows = []
+    for a in xmd.get("angles", []):
+        if a.get("cobbType") != "Cobb-segmental":
+            continue
+        ca = a.get("cobbAngle", {})
+        vu, vl = ca.get("vertebra_upper"), ca.get("vertebra_lower")
+        s_u = score_by_vertebra.get(vu, np.nan)
+        s_l = score_by_vertebra.get(vl, np.nan)
+        rows.append({
+            "vertebra_upper": vu,
+            "vertebra_lower": vl,
+            "angle": ca.get("angle"),
+            "score_upper": s_u,
+            "score_lower": s_l,
+            "score": np.nanmax([s_u, s_l]) if pd.notna(s_u) or pd.notna(s_l) else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+def get_calibration_px(xmd: dict) -> float:
+    """Pixel length of the image's calibration reference (one known real-world
+    length, usually one vertebra's height/width). Used to turn raw pixel
+    offsets into a zoom/resolution-independent unit ('vertebra widths')
+    that's comparable across images. Prefers the actual drawn calibrationLine
+    over the stored `calibration.length` scalar, falling back to the latter
+    when the line is missing."""
+    cl = xmd.get("stateObject", {}).get("calibrationLine")
+    if cl:
+        px = float(np.hypot(cl["x2"] - cl["x1"], cl["y2"] - cl["y1"]))
+        if px > 1e-6:
+            return px
+    length = (xmd.get("calibration") or {}).get("length")
+    return float(length) if length else np.nan
+
+
+def compute_spline_line_features(xmd: dict, perp_length: float = 200.0) -> pd.DataFrame:
+    """Per-vertebra residuals of the actual Cobb-segmental line vs. the line the
+    node-reconstructed B-spline predicts at that vertebra — an independent
+    reference curve (from stateObject.nodes) rather than a fit through the
+    Cobb-segmental line data itself.
+
+    For each vertebra, maps it onto the spline (same approach as the "Spline"
+    cobbType overlay in outlier_app.py) and decomposes the offset between the
+    actual line's midpoint and the spline point into:
+    - spline_lateral_resid: offset along the expected line's own direction
+      (a listhesis-style lateral/AP shift of the vertebra), in pixels
+    - spline_tangent_resid: offset along the spine's tangent (up/down;
+      mostly annotation noise, not expected to carry pathology signal), in pixels
+    - spline_angle_resid: difference between the actual line's orientation
+      and the spline-perpendicular's orientation, folded to (-90, 90]
+    - spline_lateral_resid_norm / spline_tangent_resid_norm: the two pixel
+      residuals divided by get_calibration_px(xmd), so a given offset means
+      roughly the same anatomical fraction regardless of image zoom/resolution.
+      NaN when no calibration reference is available for the image.
+
+    NaN columns when there are too few nodes, or the node count doesn't match
+    the labeled vertebra_range (nodes are mapped to labels positionally).
+    """
+    lines_df = build_cobb_segmental_lines_df(xmd)
+    resid_cols = ["spline_lateral_resid", "spline_tangent_resid", "spline_angle_resid",
+                  "spline_lateral_resid_norm", "spline_tangent_resid_norm"]
+    if lines_df.empty:
+        for c in resid_cols:
+            lines_df[c] = pd.Series(dtype=float)
+        return lines_df
+
+    calib_px = get_calibration_px(xmd)
+
+    nodes_raw = xmd.get("stateObject", {}).get("nodes", [])
+    vr = xmd.get("stateObject", {}).get("vertebra_range", [0, 0])
+    selected_vertebra = spine_labels[vr[0]: vr[1] + 1]
+    spline = interpolate_bspline([(n["x"], n["y"]) for n in nodes_raw], num_steps=200) \
+        if len(nodes_raw) >= 3 and len(nodes_raw) == len(selected_vertebra) else None
+
+    if not spline:
+        for c in resid_cols:
+            lines_df[c] = np.nan
+        return lines_df
+
+    nodes_items = [NodeItem(x=n["x"], y=n["y"]) for n in nodes_raw]
+    mapped = map_nodes_to_spline_and_keys(nodes_items, selected_vertebra, spline)
+    lbl_to_idx = {m.label: m.spline_idx for m in mapped}
+
+    rows = []
+    for _, ln in lines_df.iterrows():
+        row = ln.to_dict()
+        idx = lbl_to_idx.get(ln["vertebra"])
+        perp = get_perpendicular_lines_at_indices(spline, length=perp_length, indices=[idx]) if idx is not None else []
+        if not perp:
+            row.update({c: np.nan for c in resid_cols})
+            rows.append(row)
+            continue
+
+        p = perp[0]
+        sx, sy = spline[idx]
+        perp_dx, perp_dy = p["x2"] - p["x1"], p["y2"] - p["y1"]
+        perp_norm = np.hypot(perp_dx, perp_dy)
+        perp_unit = np.array([perp_dx, perp_dy]) / perp_norm
+        tangent_unit = np.array([-perp_unit[1], perp_unit[0]])
+
+        d = np.array([ln["mx"] - sx, ln["my"] - sy])
+        expected_angle = np.degrees(np.arctan2(perp_dy, perp_dx))
+        if expected_angle <= -90:
+            expected_angle += 180
+        elif expected_angle > 90:
+            expected_angle -= 180
+        angle_resid = ln["angle_deg"] - expected_angle
+        if angle_resid > 90:
+            angle_resid -= 180
+        elif angle_resid <= -90:
+            angle_resid += 180
+
+        lateral_resid = float(d @ perp_unit)
+        tangent_resid = float(d @ tangent_unit)
+        row.update({
+            "spline_lateral_resid": lateral_resid,
+            "spline_tangent_resid": tangent_resid,
+            "spline_angle_resid": float(angle_resid),
+            "spline_lateral_resid_norm": lateral_resid / calib_px if calib_px else np.nan,
+            "spline_tangent_resid_norm": tangent_resid / calib_px if calib_px else np.nan,
+        })
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def compute_spline_smoothing_deviation(xmd: dict, sigma: float = 1.0, num_steps: int = 200) -> pd.DataFrame:
+    """Per-vertebra local 'kink' measure: how far a vertebra's point on the raw
+    node-spline moves when the nodes are Gaussian-smoothed (sigma). A vertebra
+    whose node was placed off the smooth trend of its neighbours shifts a lot
+    under smoothing; one that's already on a smooth curve barely moves.
+
+    This probes the node placement itself, independent of the Cobb-segmental
+    lines used by compute_spline_line_features — a genuinely separate signal.
+
+    Returns one row per vertebra with `smooth_dev_px` (raw pixel distance
+    between the raw-spline point and the smoothed-spline point for that
+    vertebra) and `smooth_dev_norm` (divided by get_calibration_px(xmd)).
+    NaN when there are too few/mismatched nodes, same conditions as
+    compute_spline_line_features.
+    """
+    nodes_raw = xmd.get("stateObject", {}).get("nodes", [])
+    vr = xmd.get("stateObject", {}).get("vertebra_range", [0, 0])
+    selected_vertebra = spine_labels[vr[0]: vr[1] + 1]
+    cols = ["vertebra", "smooth_dev_px", "smooth_dev_norm"]
+
+    if len(nodes_raw) < 3 or len(nodes_raw) != len(selected_vertebra):
+        return pd.DataFrame(columns=cols)
+
+    nodes_canvas = [(n["x"], n["y"]) for n in nodes_raw]
+    spline_raw = interpolate_bspline(nodes_canvas, num_steps=num_steps)
+    spline_smooth = interpolate_bspline(smooth_nodes(nodes_canvas, sigma=sigma), num_steps=num_steps)
+    if not spline_raw or not spline_smooth:
+        return pd.DataFrame(columns=cols)
+
+    nodes_items = [NodeItem(x=x, y=y) for x, y in nodes_canvas]
+    mapped_raw = {m.label: m.spline_idx for m in map_nodes_to_spline_and_keys(nodes_items, selected_vertebra, spline_raw)}
+    mapped_smooth = {m.label: m.spline_idx for m in map_nodes_to_spline_and_keys(nodes_items, selected_vertebra, spline_smooth)}
+
+    calib_px = get_calibration_px(xmd)
+    rows = []
+    for label in selected_vertebra:
+        i_raw, i_smooth = mapped_raw.get(label), mapped_smooth.get(label)
+        if i_raw is None or i_smooth is None:
+            rows.append({"vertebra": label, "smooth_dev_px": np.nan, "smooth_dev_norm": np.nan})
+            continue
+        dev = float(np.hypot(spline_raw[i_raw][0] - spline_smooth[i_smooth][0],
+                              spline_raw[i_raw][1] - spline_smooth[i_smooth][1]))
+        rows.append({
+            "vertebra": label,
+            "smooth_dev_px": dev,
+            "smooth_dev_norm": dev / calib_px if calib_px else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Subluxation classifier (segment-level, trained on subluxation_app.py feedback)
+#
+# Validated by session-time cross-validation (GroupKFold by image, 5-fold):
+# RandomForest on these 6 features reaches AUC ~0.71 / AP ~0.18 (baseline
+# ~0.08) predicting whether a human labeled a given Cobb-segmental segment as
+# a subluxation. Moderate, real, but not diagnostic-grade — treat the output
+# as a triage/ranking aid, not a verdict.
+# ---------------------------------------------------------------------------
+
+SUBLUXATION_MODEL_FEATURES = [
+    "spl_ang_max", "spl_lat_n_max", "z_length_max", "z_pos_max", "z_angle_max", "smooth_dev_max",
+]
+
+
+def _parse_positive_segments(levels_str, all_segments: list[str]) -> set[str]:
+    """A feedback row's sublux_levels cell -> set of 'VU/VL' segment strings.
+
+    Handles both the current 'VU/VL' notation (segment_options() in
+    subluxation_app.py) and the older single-vertebra-name notation used
+    before that — a lone vertebra name is expanded to both segments
+    touching it, since it's ambiguous which one was meant.
+    """
+    if pd.isna(levels_str) or not str(levels_str).strip():
+        return set()
+    positives = set()
+    for tok in str(levels_str).split(";"):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if "/" in tok:
+            positives.add(tok)
+        else:
+            for seg in all_segments:
+                vu, vl = seg.split("/")
+                if tok in (vu, vl):
+                    positives.add(seg)
+    return positives
+
+
+def _segment_features(merged: pd.DataFrame, vu: str, vl: str) -> dict:
+    """SUBLUXATION_MODEL_FEATURES for one segment from a per-vertebra table
+    that already has z_pos/z_angle/z_length, spline_angle_resid,
+    spline_lateral_resid_norm, and smooth_dev_norm columns, indexed by
+    vertebra label."""
+    u, l = merged.loc[vu], merged.loc[vl]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        return {
+            "spl_ang_max": np.nanmax([abs(u["spline_angle_resid"]), abs(l["spline_angle_resid"])]),
+            "spl_lat_n_max": np.nanmax([abs(u["spline_lateral_resid_norm"]), abs(l["spline_lateral_resid_norm"])]),
+            "z_length_max": np.nanmax([abs(u["z_length"]), abs(l["z_length"])]),
+            "z_pos_max": np.nanmax([abs(u["z_pos"]), abs(l["z_pos"])]),
+            "z_angle_max": np.nanmax([abs(u["z_angle"]), abs(l["z_angle"])]),
+            "smooth_dev_max": np.nanmax([u["smooth_dev_norm"], l["smooth_dev_norm"]]),
+        }
+
+
+def _merged_vertebra_features(xmd: dict) -> pd.DataFrame:
+    """Per-vertebra table combining the three feature sources, indexed by
+    vertebra label — shared by build_segment_training_table() and
+    compute_segment_predictions() so they can't drift apart."""
+    z_df = compute_subluxation_scores(xmd)
+    spl_df = compute_spline_line_features(xmd)
+    dev_df = compute_spline_smoothing_deviation(xmd)
+    return (
+        z_df.merge(spl_df[["vertebra", "spline_angle_resid", "spline_lateral_resid_norm"]],
+                   on="vertebra", how="left")
+            .merge(dev_df[["vertebra", "smooth_dev_norm"]], on="vertebra", how="left")
+            .set_index("vertebra")
+    )
+
+
+def build_segment_training_table(feedback_df: pd.DataFrame, df4d: pd.DataFrame) -> pd.DataFrame:
+    """One row per (labeled measurement x Cobb-segmental segment) with
+    SUBLUXATION_MODEL_FEATURES and a binary `label` for train_subluxation_classifier().
+
+    label=1 for segments explicitly listed in a 'Subluxation vorhanden' row's
+    sublux_levels; every other segment (including all segments of a 'keine
+    Subluxation' row) is label=0.
+    """
+    rows = []
+    for _, r in feedback_df.iterrows():
+        m = df4d[(df4d["id"] == r["image_id"]) & (df4d["rater_name"] == r["rater_name"])]
+        if m.empty:
+            continue
+        xmd = m.iloc[0]["xray_measurement_data"]
+        merged = _merged_vertebra_features(xmd)
+
+        segments = []
+        for a in xmd.get("angles", []):
+            if a.get("cobbType") != "Cobb-segmental":
+                continue
+            ca = a.get("cobbAngle", {})
+            vu, vl = ca.get("vertebra_upper"), ca.get("vertebra_lower")
+            if vu and vl:
+                segments.append((vu, vl))
+        all_segment_strs = [f"{vu}/{vl}" for vu, vl in segments]
+        positives = (
+            _parse_positive_segments(r["sublux_levels"], all_segment_strs)
+            if r["sublux_label"] == "Subluxation vorhanden" else set()
+        )
+
+        for vu, vl in segments:
+            seg_str = f"{vu}/{vl}"
+            if vu not in merged.index or vl not in merged.index:
+                continue
+            row = {"image_id": r["image_id"], "rater_name": r["rater_name"], "segment": seg_str,
+                   "label": 1 if seg_str in positives else 0}
+            row.update(_segment_features(merged, vu, vl))
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def train_subluxation_classifier(training_df: pd.DataFrame):
+    """Fits the RandomForest validated by session-time cross-validation
+    (AUC ~0.71) on all available labeled segments. Returns (model, scaler,
+    yellow_threshold, red_threshold) — the two thresholds split predicted
+    probabilities into green/yellow/red at the ~80th/~93rd percentile of the
+    training set's own predictions (roughly matching the ~8% true positive
+    rate), for consistent traffic-light coloring in the UI."""
+    X = training_df[SUBLUXATION_MODEL_FEATURES]
+    mask = X.notna().all(axis=1)
+    X, y = X[mask], training_df.loc[mask, "label"]
+    scaler = StandardScaler().fit(X)
+    model = RandomForestClassifier(n_estimators=300, max_depth=4, class_weight="balanced", random_state=0)
+    model.fit(scaler.transform(X), y)
+    proba = model.predict_proba(scaler.transform(X))[:, 1]
+    yellow_threshold = float(np.quantile(proba, 0.80))
+    red_threshold = float(np.quantile(proba, 0.93))
+    return model, scaler, yellow_threshold, red_threshold
+
+
+def compute_segment_predictions(xmd: dict, model, scaler) -> pd.DataFrame:
+    """One row per Cobb-segmental segment in xmd: predicted subluxation
+    probability plus the segment's upper/lower line dicts (for drawing).
+    proba is NaN when a feature is unavailable (e.g. no calibration line, or
+    too few nodes for the spline)."""
+    merged = _merged_vertebra_features(xmd)
+
+    rows = []
+    for a in xmd.get("angles", []):
+        if a.get("cobbType") != "Cobb-segmental":
+            continue
+        ca = a.get("cobbAngle", {})
+        vu, vl = ca.get("vertebra_upper"), ca.get("vertebra_lower")
+        upper_line, lower_line = a.get("upperLine"), a.get("lowerLine")
+        if not (vu and vl and upper_line and lower_line):
+            continue
+        if vu not in merged.index or vl not in merged.index:
+            continue
+        feats = _segment_features(merged, vu, vl)
+        vec = pd.DataFrame([feats], columns=SUBLUXATION_MODEL_FEATURES)
+        proba = np.nan if vec.isna().any().any() else float(model.predict_proba(scaler.transform(vec))[0, 1])
+        rows.append({
+            "vertebra_upper": vu, "vertebra_lower": vl,
+            "upperLine": upper_line, "lowerLine": lower_line,
+            "proba": proba,
+        })
+    return pd.DataFrame(rows)

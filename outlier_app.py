@@ -422,6 +422,12 @@ def main():
         cobb = st.selectbox("cobbType", cobb_types,
                             index=cobb_types.index(default_cobb))
 
+        if "region" in outlier_df.columns:
+            all_regions = sorted(outlier_df["region"].dropna().unique())
+            sel_regions = st.multiselect("Region", all_regions, default=all_regions)
+        else:
+            sel_regions = None
+
         n_top = st.slider("Top N Bilder", min_value=5, max_value=200,
                           value=30, step=5)
 
@@ -464,9 +470,21 @@ def main():
             f"**{len(outlier_df)}** Outlier-Gruppen"
         )
 
-    # Bild-Ranking für gewählten cobbType
+    # Bild-Ranking für gewählten cobbType (ggf. nach Region gefiltert)
+    if sel_regions is not None and set(sel_regions) != set(all_regions):
+        patient_map = df4d.groupby("id")["patient_id"].first()
+        working_rank = (
+            outlier_df[outlier_df["region"].isin(sel_regions)]
+            .groupby(["cobbType", "image_id"])
+            .agg(max_std=("std", "max"), img_type=("img_type", "first"))
+            .reset_index()
+        )
+        working_rank["patient_id"] = working_rank["image_id"].map(patient_map).fillna("?")
+    else:
+        working_rank = img_rank
+
     ranked = (
-        img_rank[img_rank["cobbType"] == cobb]
+        working_rank[working_rank["cobbType"] == cobb]
         .sort_values("max_std", ascending=sort_ascending)
         .head(n_top)
         .reset_index(drop=True)
