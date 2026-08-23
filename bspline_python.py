@@ -28,6 +28,19 @@ def smooth_nodes(nodes: List[Point], sigma: float) -> List[Point]:
     smoothed_y = gaussian_filter1d(arr[:, 1], sigma=sigma, mode='nearest')
     return list(zip(smoothed_x.tolist(), smoothed_y.tolist()))
 
+
+def smooth_nodes_pinned(nodes: List[Point], sigma: float) -> List[Point]:
+    """Like smooth_nodes but keeps first and last node fixed.
+
+    End-pinning prevents the reference curve from drifting at chain boundaries,
+    so deviations are measured relative to a curve anchored at the same endpoints
+    as the original annotation.
+    """
+    smoothed = list(smooth_nodes(nodes, sigma=sigma))
+    smoothed[0] = nodes[0]
+    smoothed[-1] = nodes[-1]
+    return smoothed
+
 def interpolate_bspline(points: List[Point], num_steps: int = 10) -> List[Point]:
     """
     Interpolates an array of points using B-Spline interpolation.

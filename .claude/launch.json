@@ -7,6 +7,20 @@
       "runtimeArgs": ["run", "subluxation_app.py", "--server.headless", "true", "--server.port", "8765"],
       "port": 8765,
       "autoPort": false
+    },
+    {
+      "name": "patient_timecourse_app",
+      "runtimeExecutable": "/Users/peterbernstein/Python/ICFXStats/venv/bin/streamlit",
+      "runtimeArgs": ["run", "patient_timecourse_app.py", "--server.headless", "true", "--server.port", "8766"],
+      "port": 8766,
+      "autoPort": false
+    },
+    {
+      "name": "xray-annotator-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "/Users/peterbernstein/Vue/xray-annotator", "run", "dev", "--", "--port", "5180"],
+      "port": 5180,
+      "autoPort": false
     }
   ]
 }

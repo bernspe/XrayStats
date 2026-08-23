@@ -29,6 +29,7 @@ from scipy.stats import f as f_dist
 from bspline_python import (
     interpolate_bspline,
     smooth_nodes,
+    smooth_nodes_pinned,
     calculate_tangents,
     get_perpendicular_lines_at_indices,
     map_nodes_to_spline_and_keys,
@@ -1374,4 +1375,229 @@ def compute_segment_predictions(xmd: dict, model, scaler) -> pd.DataFrame:
             "upperLine": upper_line, "lowerLine": lower_line,
             "proba": proba,
         })
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Subluxation v2 — smoothed-spline distance features
+# ---------------------------------------------------------------------------
+
+V2_FEATURES = [
+    # All features are gradients (differences between adjacent vertebrae),
+    # invariant to absolute position, global curvature, rotation, and scale.
+    # *_delta_above is NaN for the topmost segment (no neighbour above);
+    # imputed with 0 ("no change from above") at fit/predict time.
+    "node_delta_above",  # node_dist(VU) − node_dist(VU_prev)
+    "node_delta_below",  # node_dist(VU) − node_dist(VL)
+    "spike_score",       # node_dist(VU) − mean(neighbours)
+    "seg_delta_above",   # same for endplate line midpoints
+    "seg_delta_below",
+]
+
+# Columns imputed with 0 for topmost segments (no neighbour above).
+_V2_IMPUTE_ZERO = ["node_delta_above", "seg_delta_above"]
+
+
+def _wrap90(a: float) -> float:
+    """Fold angle difference into (−90, 90] to handle the periodicity of undirected lines."""
+    while a > 90:
+        a -= 180
+    while a <= -90:
+        a += 180
+    return a
+
+
+def compute_smoothed_spline_distances(xmd: dict, sigma: float = 2.0, num_steps: int = 300) -> pd.DataFrame:
+    """Per-vertebra distances from actual measurements to an end-pinned smoothed spline.
+
+    node_dist_norm : |vertebra node → nearest point on smoothed spline| / calib_px
+    seg_dist_norm  : |endplate line midpoint → nearest point on smoothed spline| / calib_px
+
+    The smoothed spline is built from Gaussian-smoothed nodes with endpoints
+    pinned to their original positions (smooth_nodes_pinned), giving a reference
+    curve that captures the overall spinal shape without drifting at chain ends.
+    Returns an empty DataFrame when there are too few or mismatched nodes.
+    """
+    nodes_raw = xmd.get("stateObject", {}).get("nodes", [])
+    vr = xmd.get("stateObject", {}).get("vertebra_range", [0, 0])
+    selected_vertebra = spine_labels[vr[0]: vr[1] + 1]
+    cols = ["vertebra", "node_dist_px", "node_dist_norm",
+            "seg_dist_px", "seg_dist_norm", "angle_deg"]
+
+    if len(nodes_raw) < 3 or len(nodes_raw) != len(selected_vertebra):
+        return pd.DataFrame(columns=cols)
+
+    nodes_canvas = [(n["x"], n["y"]) for n in nodes_raw]
+    smoothed = smooth_nodes_pinned(nodes_canvas, sigma=sigma)
+    spline_smooth = interpolate_bspline(smoothed, num_steps=num_steps)
+    if not spline_smooth:
+        return pd.DataFrame(columns=cols)
+
+    spline_arr = np.array(spline_smooth)
+    calib_px = get_calibration_px(xmd)
+
+    lines_df = build_cobb_segmental_lines_df(xmd)
+    if not lines_df.empty:
+        seg_info = lines_df.set_index("vertebra")[["mx", "my", "angle_deg"]]
+    else:
+        seg_info = pd.DataFrame(columns=["mx", "my", "angle_deg"])
+
+    rows = []
+    for label, node in zip(selected_vertebra, nodes_canvas):
+        node_pt = np.array(node)
+        node_dist_px = float(np.hypot(spline_arr[:, 0] - node_pt[0],
+                                      spline_arr[:, 1] - node_pt[1]).min())
+
+        seg_dist_px = np.nan
+        angle_deg = np.nan
+        if label in seg_info.index:
+            info = seg_info.loc[label]
+            seg_dist_px = float(np.hypot(spline_arr[:, 0] - info["mx"],
+                                         spline_arr[:, 1] - info["my"]).min())
+            angle_deg = float(info["angle_deg"])
+
+        rows.append({
+            "vertebra": label,
+            "node_dist_px": node_dist_px,
+            "node_dist_norm": node_dist_px / calib_px if calib_px else np.nan,
+            "seg_dist_px": seg_dist_px,
+            "seg_dist_norm": seg_dist_px / calib_px if calib_px else np.nan,
+            "angle_deg": angle_deg,
+        })
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _v2_segment_features(dist_df: pd.DataFrame, vu: str, vl: str) -> dict:
+    """Compute V2_FEATURES for segment VU/VL.
+
+    dist_df must be indexed by vertebra label, rows in spine order (cranial→caudal),
+    as returned by compute_smoothed_spline_distances(...).set_index('vertebra').
+
+    All features are gradients (differences between adjacent vertebrae), not
+    absolute distances. This makes them invariant to global spinal curvature:
+    a curved spine where all nodes are equally far from the smoothed reference
+    produces near-zero gradient features throughout.
+    """
+    def _get(col: str, label: str) -> float:
+        return dist_df.at[label, col] if label in dist_df.index else np.nan
+
+    nd_u   = _get("node_dist_norm", vu)
+    nd_l   = _get("node_dist_norm", vl)
+    sd_u   = _get("seg_dist_norm",  vu)
+    sd_l   = _get("seg_dist_norm",  vl)
+    ang_u  = _get("angle_deg",      vu)
+    ang_l  = _get("angle_deg",      vl)
+
+    # Vertebra immediately above VU in the measured chain (spine-ordered index)
+    labels = list(dist_df.index)
+    vu_pos = labels.index(vu) if vu in labels else -1
+    vu_prev = labels[vu_pos - 1] if vu_pos > 0 else None
+    nd_above  = _get("node_dist_norm", vu_prev) if vu_prev else np.nan
+    sd_above  = _get("seg_dist_norm",  vu_prev) if vu_prev else np.nan
+    ang_above = _get("angle_deg",      vu_prev) if vu_prev else np.nan
+
+    node_nn = [v for v in (nd_above, nd_l)  if not np.isnan(v)]
+    ang_nn  = [v for v in (ang_above, ang_l) if not np.isnan(v)]
+
+    spike_score = nd_u - float(np.mean(node_nn)) if node_nn else np.nan
+    angle_spike = _wrap90(ang_u - float(np.mean(ang_nn))) if ang_nn else np.nan
+
+    return {
+        "node_delta_above":  nd_u - nd_above,
+        "node_delta_below":  nd_u - nd_l,
+        "spike_score":       spike_score,
+        "seg_delta_above":   sd_u - sd_above,
+        "seg_delta_below":   sd_u - sd_l,
+        "angle_delta_above": _wrap90(ang_u - ang_above),
+        "angle_delta_below": _wrap90(ang_u - ang_l),
+        "angle_spike":       angle_spike,
+    }
+
+
+def build_v2_training_table(feedback_df: pd.DataFrame, df4d: pd.DataFrame,
+                            sigma: float = 2.0) -> pd.DataFrame:
+    """One row per (labeled measurement × Cobb-segmental segment) with V2_FEATURES and binary label.
+
+    Augmentation: for every original row a reflected copy is added with negated
+    angle features (_V2_ANGLE_FEATURES). This makes the model invariant to
+    left-right image orientation without requiring image-level preprocessing.
+    The reflected copy keeps the same image_id so GroupKFold keeps originals
+    and their mirrors in the same fold, preventing data leakage.
+    """
+    rows = []
+    for _, r in feedback_df.iterrows():
+        m = df4d[(df4d["id"] == r["image_id"]) & (df4d["rater_name"] == r["rater_name"])]
+        if m.empty:
+            continue
+        xmd = m.iloc[0]["xray_measurement_data"]
+        dist_df = compute_smoothed_spline_distances(xmd, sigma=sigma).set_index("vertebra")
+        if dist_df.empty:
+            continue
+
+        segments = [(a["cobbAngle"]["vertebra_upper"], a["cobbAngle"]["vertebra_lower"])
+                    for a in xmd.get("angles", [])
+                    if a.get("cobbType") == "Cobb-segmental"
+                    and a.get("cobbAngle", {}).get("vertebra_upper")
+                    and a.get("cobbAngle", {}).get("vertebra_lower")]
+        all_seg_strs = [f"{vu}/{vl}" for vu, vl in segments]
+        positives = (
+            _parse_positive_segments(r["sublux_levels"], all_seg_strs)
+            if r["sublux_label"] == "Subluxation vorhanden" else set()
+        )
+
+        for vu, vl in segments:
+            if vu not in dist_df.index or vl not in dist_df.index:
+                continue
+            feats = _v2_segment_features(dist_df, vu, vl)
+            base = {"image_id": r["image_id"], "rater_name": r["rater_name"],
+                    "segment": f"{vu}/{vl}", "label": 1 if f"{vu}/{vl}" in positives else 0,
+                    **feats}
+            rows.append({**base, "augmented": False})
+
+    return pd.DataFrame(rows)
+
+
+def train_v2_classifier(training_df: pd.DataFrame):
+    """Logistic regression on V2_FEATURES with balanced class weights.
+
+    Returns (model, scaler, yellow_threshold, red_threshold).
+    Thresholds split predicted probabilities at the 80th/93rd percentile of
+    training predictions — consistent with the v1 traffic-light convention.
+    """
+    from sklearn.linear_model import LogisticRegression
+    X = training_df[V2_FEATURES].copy()
+    X[_V2_IMPUTE_ZERO] = X[_V2_IMPUTE_ZERO].fillna(0.0)
+    mask = X.notna().all(axis=1)
+    X, y = X[mask], training_df.loc[mask, "label"]
+    scaler = StandardScaler().fit(X)
+    model = LogisticRegression(class_weight="balanced", max_iter=1000, random_state=0)
+    model.fit(scaler.transform(X), y)
+    proba = model.predict_proba(scaler.transform(X))[:, 1]
+    return model, scaler, float(np.quantile(proba, 0.80)), float(np.quantile(proba, 0.93))
+
+
+def compute_v2_segment_predictions(xmd: dict, model, scaler, sigma: float = 2.0) -> pd.DataFrame:
+    """One row per Cobb-segmental segment: V2_FEATURES + proba + line dicts for drawing."""
+    dist_df = compute_smoothed_spline_distances(xmd, sigma=sigma)
+    if dist_df.empty:
+        return pd.DataFrame()
+    dist_df = dist_df.set_index("vertebra")
+
+    rows = []
+    for a in xmd.get("angles", []):
+        if a.get("cobbType") != "Cobb-segmental":
+            continue
+        ca = a.get("cobbAngle", {})
+        vu, vl = ca.get("vertebra_upper"), ca.get("vertebra_lower")
+        upper_line, lower_line = a.get("upperLine"), a.get("lowerLine")
+        if not (vu and vl and upper_line and lower_line):
+            continue
+        if vu not in dist_df.index or vl not in dist_df.index:
+            continue
+        feats = _v2_segment_features(dist_df, vu, vl)
+        vec = pd.DataFrame([feats], columns=V2_FEATURES)
+        proba = (float(model.predict_proba(scaler.transform(vec))[0, 1])
+                 if not vec.isna().any().any() else np.nan)
+        rows.append({"segment": f"{vu}/{vl}", "vertebra_upper": vu, "vertebra_lower": vl,
+                     "upper_line": upper_line, "lower_line": lower_line, **feats, "proba": proba})
     return pd.DataFrame(rows)

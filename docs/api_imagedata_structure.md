@@ -325,6 +325,7 @@ Enthält die interaktive Annotationsebene der Messung:
 {
   "vertebra_range": [16, 25],
   "nodes": [ ... ],
+  "suggestedNodes": [ ... ],
   "cobbLines": [ ... ],
   "calibrationLine": { ... }
 }
@@ -333,7 +334,8 @@ Enthält die interaktive Annotationsebene der Messung:
 | Feld | Typ | Beschreibung |
 |---|---|---|
 | `vertebra_range` | array[2] | Start- und End-Index im Wirbelsäulenlabel-Array (§8) |
-| `nodes` | array | Manuell gesetzte Stützpunkte des Splines (§7.4.1) |
+| `nodes` | array | Manuell gesetzte (ggf. nachbearbeitete) Stützpunkte des Splines (§7.4.1) |
+| `suggestedNodes` | array \| null | Snapshot der vom ONNX-Modell vorgeschlagenen Nodes zum Zeitpunkt des Suggest-Buttons; `null` wenn Feature nicht genutzt (§7.4.1) |
 | `cobbLines` | array | Eingezeichnete Cobb-Linien (§7.4.2) |
 | `calibrationLine` | object | Kalibrierungslinie im Bild (§7.4.3) |
 
@@ -511,6 +513,7 @@ ImageData[]
             └── stateObject:
                 ├── vertebra_range: [int, int]
                 ├── nodes[]: { x, y, fill, type, radius }
+                ├── suggestedNodes[]: { x, y, fill, type, radius } | null
                 ├── cobbLines[]: { x1, x2, y1, y2 [, mode] }
                 └── calibrationLine: { x1, x2, y1, y2 }
 ```
