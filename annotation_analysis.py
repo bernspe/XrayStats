@@ -15,6 +15,8 @@ Main entry points for the notebook:
     get_inflection_overlay_data(xmd, ...)    -> dict with angles + perp_lines for visualization
 """
 
+import math
+import re
 import warnings
 import numpy as np
 import pandas as pd
@@ -680,17 +682,82 @@ def compute_icc_by_region(
     return pd.DataFrame(rows)
 
 
+# Lateral views report TK/LL composed across the spline's inflection segments.
+# Mirrors isLateralImgType / lateralRegionalAngles in the frontend's
+# src/helpers/analysisUtils.ts — the ICC must measure what AngleTable shows.
+_LATERAL_RE = re.compile(r'lat|sag|incl|recl')
+_BORDER_TOLERANCE = 2
+
+
+def _borders_around(target: str) -> list[str]:
+    t = spine_labels.index(target)
+    near = [l for i, l in enumerate(spine_labels) if abs(i - t) <= _BORDER_TOLERANCE]
+    return sorted(near, key=lambda l: (abs(spine_labels.index(l) - t), -spine_labels.index(l)))
+
+
+_TK_UPPER, _TK_LOWER = ['T4', 'T3'], _borders_around('T12')
+_LL_UPPER, _LL_LOWER = _borders_around('T12'), _borders_around('S1')
+
+
+def _signed_angle(l1: dict, l2: dict) -> float:
+    def direction(l):
+        dx, dy = (l.get('x2') or 0) - (l.get('x1') or 0), (l.get('y2') or 0) - (l.get('y1') or 0)
+        if dx < 0:
+            dx, dy = -dx, -dy
+        return math.degrees(math.atan2(dy, dx))
+    a = direction(l2) - direction(l1)
+    return a - 180 if a > 90 else a + 180 if a <= -90 else a
+
+
+def _line(d: dict) -> Line:
+    return Line(**{k: d.get(k) for k in ('x1', 'y1', 'x2', 'y2')})
+
+
+def _compose_span(segs: list[dict], upper: list[str], lower: list[str]) -> dict | None:
+    def pick(labels, border):
+        for l in labels:
+            hit = next((s for s in segs if s.get('cobbAngle', {}).get(border) == l), None)
+            if hit:
+                return hit
+        return None
+    up, lo = pick(upper, 'vertebra_upper'), pick(lower, 'vertebra_lower')
+    if not up or not lo or not up.get('upperLine') or not lo.get('lowerLine'):
+        return None
+    vu, vl = up['cobbAngle']['vertebra_upper'], lo['cobbAngle']['vertebra_lower']
+    if spine_labels.index(vu) >= spine_labels.index(vl):
+        return None
+    return {'vertebra_upper': vu, 'vertebra_lower': vl,
+            'upperLine': up['upperLine'], 'lowerLine': lo['lowerLine'],
+            'angle': calculate_angle(_line(up['upperLine']), _line(lo['lowerLine']))}
+
+
+def lateral_regional_angles(angles: list[dict], cobb_type: str) -> dict[str, dict]:
+    """{'TK': span, 'LL': span} for one cobbType — whichever the measurement covers.
+    LL goes negative only when it bends the same way as TK (lumbar kyphosis)."""
+    segs = [a for a in angles if a.get('cobbType') == cobb_type]
+    tk = _compose_span(segs, _TK_UPPER, _TK_LOWER)
+    ll = _compose_span(segs, _LL_UPPER, _LL_LOWER)
+    if tk and ll and np.sign(_signed_angle(tk['upperLine'], tk['lowerLine'])) == \
+            np.sign(_signed_angle(ll['upperLine'], ll['lowerLine'])):
+        ll['angle'] = -ll['angle']
+    return {k: v for k, v in (('TK', tk), ('LL', ll)) if v}
+
+
 def build_angles_df(
     df4d_source: pd.DataFrame,
     include_reconstructed: bool = False,
     include_inflection: bool = False,
     min_inflection_angle: float = 5.0,
     smooth_sigma: float = 0.0,
+    lateral_spans: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     """One row per (image_id, rater_name, cobbType, vertebra_upper, vertebra_lower) with column angle.
 
     smooth_sigma > 0 applies Gaussian node smoothing before B-spline fitting for
     reconstructed and inflection angles (API-native angles are never modified).
+
+    lateral_spans: cobbTypes for which lateral img_types get one extra row each for
+    the composed TK/LL span (region 'TK'/'LL'); Port aus xray_api/api/helpers/annotation_analysis.py.
     """
     rows = []
     for _, row in df4d_source.iterrows():
@@ -720,6 +787,16 @@ def build_angles_df(
                 "region": _safe_region(ca.get("vertebra_upper", ""), ca.get("vertebra_lower", "")),
                 "angle": ca.get("angle", None),
             })
+        if lateral_spans and _LATERAL_RE.search(row["img_type"] or ""):
+            for ct in lateral_spans:
+                for region, span in lateral_regional_angles(all_angles, ct).items():
+                    rows.append({
+                        "image_id": row["id"], "img_type": row["img_type"],
+                        "rater_name": row["rater_name"], "rater_id": row["rater_id"],
+                        "cobbType": ct, "vertebra_upper": span["vertebra_upper"],
+                        "vertebra_lower": span["vertebra_lower"],
+                        "region": region, "angle": span["angle"],
+                    })
     return pd.DataFrame(rows)
 
 

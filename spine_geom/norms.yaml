@@ -1,0 +1,290 @@
+# Normwerte und Zielformeln (Spec §3.4, §3.6, Phase 4). Nie im Code hart kodieren.
+#
+# Konventionen (wie spine_geom.sagittal): Winkel in Grad, LL (L1–S1) als positive Lordose,
+# VPAs positiv = Centroid anterior der Linie Hüftachse → S1-Mitte, SVA in mm (unsere Messung: WKD!).
+# verified: true = Wert gegen Original/Abstract geprüft; false = aus der Spec übernommen, ungeprüft.
+#
+# Standard: MEANS (multiethnisch). Alters-/Geschlechtsstrata: Yukawa 2018 (Nutzerentscheidung 2026-09-29).
+# Ergänzt (2026-09-29, PDFs vom Nutzer): Wang 2025 (Altersstrata ≥ 50 J., LL L1–S1), Gharbi 2024 (koronar,
+# T1PA/GT mit SD). Rang: Alters+Geschlechtsstratum > Altersstratum > Gesamtnorm; Gleichstand → mit SD vor
+# ohne SD, dann Reihenfolge in der Liste. Altersgrenzen halboffen: age: [lo, hi] heißt lo ≤ Alter < hi.
+
+sources:
+  MEANS_spinopelvic:
+    citation: "Sardar ZM et al. Age and Gender Based Spinopelvic and Regional Spinal Alignment in Asymptomatic Adult Volunteers: Results of MEANS. Spine 2022;47(19):1382-1390. doi:10.1097/BRS.0000000000004415"
+    population: "asymptomatisch, multiethnisch (FR, JP, SG, TN, US), EOS stehend"
+    n: 468
+    age_range: [18, 80]
+    verified: true   # Abstract via Europe PMC
+  MEANS_global:
+    citation: "Sardar ZM et al. Age- and Gender-based Global Sagittal Spinal Alignment in Asymptomatic Adult Volunteers: Results of MEANS. Spine 2022;47(19):1372-1381. doi:10.1097/BRS.0000000000004413"
+    population: "wie MEANS_spinopelvic"
+    n: 468
+    age_range: [18, 80]
+    verified: true
+  Yukawa2018:
+    citation: "Yukawa Y et al. Normative data for parameters of sagittal spinal alignment in healthy subjects: an analysis of gender specific differences and changes with aging in 626 asymptomatic individuals. Eur Spine J 2018. doi:10.1007/s00586-016-4807-7"
+    population: "asymptomatisch, Japan, Ganzwirbelsäule stehend, Röntgen; ≥ 48 je Geschlecht und Dekade (20er–70er); Übergangsanomalien ausgeschlossen"
+    n: 626
+    age_range: [20, 80]
+    verified: true   # Volltext-PDF, Tabellen 1, 4–8 (Nutzer, 2026-09-29)
+  Wang2025:
+    citation: "Wang W et al. Age-Related Changes and Spinal Sagittal Alignment in Asymptomatic Community-Dwelling Adults Over 50. Spine 2025;50(21):E431-E437. doi:10.1097/BRS.0000000000005248"
+    population: "asymptomatisch, Community-Kohorte Peking (Han-chinesisch), ≥ 50 J., 60 % weiblich, Röntgen stehend"
+    n: 701
+    age_range: [50, 90]
+    verified: true   # Volltext-PDF, Tabelle 2; n je Altersgruppe nicht angegeben
+  Gharbi2024:
+    citation: "Gharbi A et al. Coronal alignment in normal individuals and moderate scoliosis: Normative values, variation with age and comparison with sagittal alignment. Brain and Spine 2024;4:103917. doi:10.1016/j.bas.2024.103917"
+    population: "EOS stehend, Frankreich (Straßburg/Bordeaux), N-Gruppe ohne Skoliose n = 236, Alter 6–89 J.; koronare Werte als Beträge"
+    n: 236
+    age_range: [6, 90]
+    verified: true   # Volltext-PDF, Tabellen 1, 2, 4, 5
+  Hills2022:
+    citation: "Hills J et al. The T4-L1-Hip Axis. Spine 2022. PMID 35867583 (Werte laut Spec §3.4)"
+    population: "asymptomatisch bzw. operierte ASD-Kohorte (Zielbereich)"
+    n: null
+    age_range: null
+    verified: false
+  GAP_Yilgor2017:
+    citation: "Yilgor C et al. Global Alignment and Proportion (GAP) Score, 2017 (Werte laut Spec §3.4)"
+    population: "ASD, operativ"
+    n: null
+    age_range: null
+    verified: false
+  SRS_Schwab:
+    citation: "SRS-Schwab-Klassifikation (Werte laut Spec §3.2)"
+    population: "ASD"
+    n: null
+    age_range: null
+    verified: false
+  Roussouly:
+    citation: "Roussouly-Typen (Werte laut Spec §3.4)"
+    population: "asymptomatisch"
+    n: null
+    age_range: null
+    verified: false
+
+# Populationsnormen: param → Liste von Einträgen (Rangregel oben). unit muss zur eigenen Messung passen.
+population:
+  PI:
+    - {source: MEANS_spinopelvic, mean: 52.0, sd: 10.7, unit: deg}
+    - source: Yukawa2018
+      unit: deg
+      mean: 53.7
+      sd: 10.9
+      strata:
+        - {sex: male, age: [20, 30], mean: 54.4, sd: 10.1, n: 48}
+        - {sex: male, age: [30, 40], mean: 52.9, sd: 10.2, n: 51}
+        - {sex: male, age: [40, 50], mean: 50.8, sd: 7.8, n: 50}
+        - {sex: male, age: [50, 60], mean: 53.0, sd: 11.3, n: 56}
+        - {sex: male, age: [60, 70], mean: 52.0, sd: 10.9, n: 50}
+        - {sex: male, age: [70, 80], mean: 52.0, sd: 10.3, n: 50}
+        - {sex: female, age: [20, 30], mean: 51.8, sd: 11.7, n: 53}
+        - {sex: female, age: [30, 40], mean: 51.2, sd: 9.5, n: 50}
+        - {sex: female, age: [40, 50], mean: 57.0, sd: 10.8, n: 57}
+        - {sex: female, age: [50, 60], mean: 56.2, sd: 11.3, n: 51}
+        - {sex: female, age: [60, 70], mean: 56.0, sd: 12.7, n: 60}
+        - {sex: female, age: [70, 80], mean: 57.4, sd: 9.5, n: 50}
+    - source: Wang2025
+      unit: deg
+      strata:
+        - {age: [50, 55], mean: 48.73, sd: 8.41}
+        - {age: [55, 60], mean: 50.56, sd: 9.02}
+        - {age: [60, 65], mean: 48.42, sd: 8.83}
+        - {age: [65, 70], mean: 49.60, sd: 9.16}
+        - {age: [70, 75], mean: 50.89, sd: 9.77}
+        - {age: [75, 120], mean: 49.28, sd: 8.24}
+  PT:
+    - {source: MEANS_spinopelvic, mean: 12.5, sd: 7.3, unit: deg}
+    - source: Yukawa2018
+      unit: deg
+      mean: 14.5
+      sd: 8.4
+      strata:
+        - {sex: male, age: [20, 30], mean: 12.9, sd: 8.1, n: 48}
+        - {sex: male, age: [30, 40], mean: 13.1, sd: 7.7, n: 51}
+        - {sex: male, age: [40, 50], mean: 11.5, sd: 5.8, n: 50}
+        - {sex: male, age: [50, 60], mean: 13.3, sd: 9.8, n: 56}
+        - {sex: male, age: [60, 70], mean: 13.7, sd: 7.1, n: 50}
+        - {sex: male, age: [70, 80], mean: 15.3, sd: 7.4, n: 50}
+        - {sex: female, age: [20, 30], mean: 11.4, sd: 6.6, n: 53}
+        - {sex: female, age: [30, 40], mean: 12.0, sd: 6.7, n: 50}
+        - {sex: female, age: [40, 50], mean: 16.2, sd: 8.4, n: 57}
+        - {sex: female, age: [50, 60], mean: 15.1, sd: 7.5, n: 51}
+        - {sex: female, age: [60, 70], mean: 18.4, sd: 9.2, n: 60}
+        - {sex: female, age: [70, 80], mean: 21.0, sd: 7.8, n: 50}
+    - source: Wang2025
+      unit: deg
+      strata:
+        - {age: [50, 55], mean: 12.98, sd: 5.00}
+        - {age: [55, 60], mean: 14.65, sd: 5.54}
+        - {age: [60, 65], mean: 14.49, sd: 6.29}
+        - {age: [65, 70], mean: 15.13, sd: 6.13}
+        - {age: [70, 75], mean: 15.51, sd: 5.85}
+        - {age: [75, 120], mean: 18.97, sd: 6.17}
+  SS:
+    - {source: MEANS_spinopelvic, mean: 39.5, sd: 8.2, unit: deg}
+    - source: Yukawa2018
+      unit: deg
+      mean: 39.4
+      sd: 8.0
+      strata:
+        - {sex: male, age: [20, 30], mean: 41.6, sd: 7.4, n: 48}
+        - {sex: male, age: [30, 40], mean: 40.0, sd: 7.1, n: 51}
+        - {sex: male, age: [40, 50], mean: 39.8, sd: 6.9, n: 50}
+        - {sex: male, age: [50, 60], mean: 40.1, sd: 8.9, n: 56}
+        - {sex: male, age: [60, 70], mean: 38.2, sd: 8.7, n: 50}
+        - {sex: male, age: [70, 80], mean: 37.2, sd: 10.5, n: 50}
+        - {sex: female, age: [20, 30], mean: 40.3, sd: 9.1, n: 53}
+        - {sex: female, age: [30, 40], mean: 39.7, sd: 6.5, n: 50}
+        - {sex: female, age: [40, 50], mean: 41.1, sd: 7.8, n: 57}
+        - {sex: female, age: [50, 60], mean: 41.0, sd: 7.6, n: 51}
+        - {sex: female, age: [60, 70], mean: 37.5, sd: 8.0, n: 60}
+        - {sex: female, age: [70, 80], mean: 36.7, sd: 9.1, n: 50}
+    - source: Wang2025
+      unit: deg
+      strata:
+        - {age: [50, 55], mean: 35.75, sd: 7.49}
+        - {age: [55, 60], mean: 35.92, sd: 8.00}
+        - {age: [60, 65], mean: 33.93, sd: 8.10}
+        - {age: [65, 70], mean: 34.47, sd: 7.09}
+        - {age: [70, 75], mean: 35.38, sd: 8.23}
+        - {age: [75, 120], mean: 30.31, sd: 7.88}
+  LL:
+    # alle L1–S1, positive Lordose (MEANS im Original negativ kodiert).
+    # Yukawa-LL (Tab. 4) ist T12–S1 → nicht vergleichbar, bewusst weggelassen.
+    - {source: MEANS_spinopelvic, mean: 57.4, sd: 11.3, unit: deg}
+    - source: Wang2025
+      unit: deg
+      strata:
+        - {age: [50, 55], mean: 51.95, sd: 10.64}
+        - {age: [55, 60], mean: 51.18, sd: 10.41}
+        - {age: [60, 65], mean: 49.70, sd: 10.79}
+        - {age: [65, 70], mean: 50.36, sd: 10.36}
+        - {age: [70, 75], mean: 51.71, sd: 11.10}
+        - {age: [75, 120], mean: 47.30, sd: 11.70}
+  PI_LL:
+    - {source: MEANS_spinopelvic, mean: -5.4, sd: 10.7, unit: deg}
+    - source: Gharbi2024
+      unit: deg
+      strata:
+        - {age: [20, 50], mean: -4.3, sd: 10.4}
+        - {age: [50, 120], mean: 1.3, sd: 11.7}
+  T1PA:
+    # MEANS: nur Altersmittel ohne SD; „young adults“ im Abstract nicht abgegrenzt → 18–35 angenommen
+    - {source: MEANS_global, unit: deg, strata: [{age: [18, 35], mean: 5.0}, {age: [65, 81], mean: 13.7}]}
+    - source: Gharbi2024
+      unit: deg
+      mean: 11.3
+      sd: 7.4
+      strata:
+        - {age: [20, 50], mean: 9.7, sd: 6.8}
+        - {age: [50, 120], mean: 15.8, sd: 7.1}
+  GT:
+    - source: Gharbi2024
+      unit: deg
+      mean: 13.8
+      sd: 8.8
+      strata:
+        - {age: [20, 50], mean: 14.8, sd: 7.5}
+        - {age: [50, 120], mean: 16.5, sd: 9.3}
+  SVA:
+    # Normen in mm, unsere SVA in WKD → nur zur Information, keine Abweichung
+    - {source: MEANS_global, unit: mm, strata: [{age: [18, 35], mean: -14.2}, {age: [65, 81], mean: 17.0}]}
+    - source: Yukawa2018
+      unit: mm
+      mean: 3.1
+      sd: 12.6
+      strata:
+        - {sex: male, age: [20, 30], mean: -2.1, sd: 8.2, n: 48}
+        - {sex: male, age: [30, 40], mean: 3.0, sd: 9.2, n: 51}
+        - {sex: male, age: [40, 50], mean: 5.0, sd: 13.7, n: 50}
+        - {sex: male, age: [50, 60], mean: 4.5, sd: 11.8, n: 56}
+        - {sex: male, age: [60, 70], mean: 5.5, sd: 14.0, n: 50}
+        - {sex: male, age: [70, 80], mean: 10.3, sd: 14.4, n: 50}
+        - {sex: female, age: [20, 30], mean: -4.6, sd: 13.5, n: 53}
+        - {sex: female, age: [30, 40], mean: -4.1, sd: 13.0, n: 50}
+        - {sex: female, age: [40, 50], mean: 0.9, sd: 9.0, n: 57}
+        - {sex: female, age: [50, 60], mean: 3.4, sd: 11.1, n: 51}
+        - {sex: female, age: [60, 70], mean: 4.6, sd: 10.4, n: 60}
+        - {sex: female, age: [70, 80], mean: 10.7, sd: 15.2, n: 50}
+    - source: Wang2025
+      unit: mm
+      strata:
+        - {age: [50, 55], mean: -20.24, sd: 24.32}
+        - {age: [55, 60], mean: -19.02, sd: 26.27}
+        - {age: [60, 65], mean: -8.65, sd: 26.88}
+        - {age: [65, 70], mean: -5.95, sd: 25.83}
+        - {age: [70, 75], mean: 1.34, sd: 29.82}
+        - {age: [75, 120], mean: 8.84, sd: 30.76}
+
+  # --- koronar (Gharbi 2024, N-Gruppe; Beträge, Verteilung rechtsschief → z nur grob) ---
+  FHA:              # Hüftkopfwinkel: Linie beider Hüftkopfzentren zur Horizontalen
+    - source: Gharbi2024
+      unit: deg
+      mean: 1.6
+      sd: 1.2
+      strata:
+        - {age: [0, 20], mean: 1.7, sd: 1.2}
+        - {age: [20, 50], mean: 1.5, sd: 1.2}
+        - {age: [50, 120], mean: 1.6, sd: 1.0}
+  L4_tilt:          # kraniale L4-Deckplatte zur Horizontalen
+    - source: Gharbi2024
+      unit: deg
+      mean: 3.0
+      sd: 2.3
+      strata:
+        - {age: [0, 20], mean: 3.0, sd: 2.3}
+        - {age: [20, 50], mean: 2.8, sd: 2.3}
+        - {age: [50, 120], mean: 3.2, sd: 2.3}
+  L5_tilt:
+    - source: Gharbi2024
+      unit: deg
+      mean: 3.0
+      sd: 2.3
+      strata:
+        - {age: [0, 20], mean: 3.0, sd: 2.3}
+        - {age: [20, 50], mean: 2.8, sd: 2.3}
+        - {age: [50, 120], mean: 3.2, sd: 2.3}
+  CTPA:             # koronarer T1PA: Vertikale vs. Linie S1-Deckplattenmitte → T1-Centroid
+    - source: Gharbi2024
+      unit: deg
+      mean: 1.1
+      sd: 1.0
+      strata:
+        - {age: [0, 20], mean: 1.1, sd: 1.0}
+        - {age: [20, 50], mean: 1.0, sd: 0.8}
+        - {age: [50, 120], mean: 1.3, sd: 1.1}
+  C7_CSVL:          # C7-Lot zur S1-Deckplattenmitte, mm (unsere Messung WKD → nur Information)
+    - source: Gharbi2024
+      unit: mm
+      mean: 8.3
+      sd: 7.5
+      strata:
+        - {age: [0, 20], mean: 7.5, sd: 7.1}
+        - {age: [20, 50], mean: 7.6, sd: 6.4}
+        - {age: [50, 120], mean: 9.7, sd: 8.7}
+
+# Aus der PI abgeleitete Ziele: target = a·PI + b; resid_sd = Streuung um die Zielgerade (falls bekannt)
+pi_targets:
+  L1PA:
+    - {source: Hills2022, a: 0.5, b: -21.0, resid_sd: null, note: "Normalbeziehung r² = 0,58"}
+    - {source: Hills2022, a: 0.5, b: -19.0, resid_sd: 2.0, note: "Zielbereich minimales mechanisches Versagen: 0,5·PI − (19 ± 2)°"}
+  SS:
+    - {source: GAP_Yilgor2017, a: 0.59, b: 9.0, resid_sd: null, note: "ideale SS"}
+  LL:
+    - {source: GAP_Yilgor2017, a: 0.62, b: 29.0, resid_sd: null, note: "ideale LL, R² = 0,39"}
+
+# Feste Zielbereiche
+target_ranges:
+  T4L1PA_mismatch: {source: Hills2022, low: -3.0, high: 1.0, note: "Mismatch mit minimalem Versagensrisiko"}
+  LDI: {source: GAP_Yilgor2017, low: 50.0, high: 80.0, unit: "%", note: "L4–S1 / L1–S1 × 100"}
+
+# Klassifikationen: Schwellen aufsteigend, labels eins mehr als thresholds
+classifications:
+  schwab_PI_LL: {source: SRS_Schwab, param: PI_LL, thresholds: [10.0, 20.0], labels: ["0", "+", "++"]}
+  schwab_PT: {source: SRS_Schwab, param: PT, thresholds: [20.0, 30.0], labels: ["0", "+", "++"]}
+  roussouly_theoretical: {source: Roussouly, param: SS_ideal, thresholds: [35.0, 45.0], labels: ["1/2", "3", "4"],
+                          note: "theoretischer Typ aus idealer SS (GAP) statt gemessener SS"}
+  roussouly_measured: {source: Roussouly, param: SS, thresholds: [35.0, 45.0], labels: ["1/2", "3", "4"]}

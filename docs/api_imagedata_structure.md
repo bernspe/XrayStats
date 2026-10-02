@@ -326,6 +326,7 @@ Enthält die interaktive Annotationsebene der Messung:
   "vertebra_range": [16, 25],
   "nodes": [ ... ],
   "suggestedNodes": [ ... ],
+  "suggestedLines": [ ... ],
   "cobbLines": [ ... ],
   "calibrationLine": { ... }
 }
@@ -335,9 +336,10 @@ Enthält die interaktive Annotationsebene der Messung:
 |---|---|---|
 | `vertebra_range` | array[2] | Start- und End-Index im Wirbelsäulenlabel-Array (§8) |
 | `nodes` | array | Manuell gesetzte (ggf. nachbearbeitete) Stützpunkte des Splines (§7.4.1) |
-| `suggestedNodes` | array \| null | Snapshot der vom ONNX-Modell vorgeschlagenen Nodes zum Zeitpunkt des Suggest-Buttons; `null` wenn Feature nicht genutzt (§7.4.1) |
+| `suggestedNodes` | array \| null | Snapshot der vom Modell vorgeschlagenen Nodes zum Zeitpunkt des Suggest-Buttons; `null` wenn Feature nicht genutzt (§7.4.1) |
+| `suggestedLines` | array \| null | Snapshot der vom Modell vorgeschlagenen segmentalen Cobb-Linien ("Suggest Lines"); `null` wenn Feature nicht genutzt. Fehlt in Messungen vor 09/2026 (§7.4.3) |
 | `cobbLines` | array | Eingezeichnete Cobb-Linien (§7.4.2) |
-| `calibrationLine` | object | Kalibrierungslinie im Bild (§7.4.3) |
+| `calibrationLine` | object | Kalibrierungslinie im Bild (§7.4.4) |
 
 #### `vertebra_range` Verteilung
 
@@ -378,7 +380,8 @@ Häufigste Anzahl: 9 Nodes (308×), 8 Nodes (279×), 10 Nodes (168×), 7 Nodes (
   "x2": 676.0,
   "y1": 183.0,
   "y2": 225.0,
-  "mode": "Cobb-regional"
+  "mode": "Cobb-regional",
+  "src": "model"
 }
 ```
 
@@ -387,10 +390,25 @@ Häufigste Anzahl: 9 Nodes (308×), 8 Nodes (279×), 10 Nodes (168×), 7 Nodes (
 | `x1`, `y1` | float | Startpunkt der Linie (Pixel) |
 | `x2`, `y2` | float | Endpunkt der Linie (Pixel) |
 | `mode` | string / null | `"Cobb-regional"`, `"Cobb-segmental"`, oder fehlt |
+| `src` | string / null | `"model"` bei Linien aus dem Vorschlag (§7.4.3), sonst nicht vorhanden. Bleibt auch nach manuellem Verschieben stehen — die unveränderte Ausgangslage steht in `suggestedLines` |
 
 **Verteilung:** `Cobb-segmental` (8.427×), `Cobb-regional` (2.349×), ohne `mode` (1.603×)
 
-#### 7.4.3 `calibrationLine` – Kalibrierungslinie
+#### 7.4.3 `suggestedLines` – vorgeschlagene Endplattenlinien
+
+Gleiche Struktur wie `cobbLines` (§7.4.2), `mode` immer `"Cobb-segmental"`. Die Linien werden
+beim Klick auf *Suggest Lines* zusätzlich nach `cobbLines` übernommen und dort ggf. verschoben;
+`suggestedLines` hält den unveränderten Modellvorschlag fest — der Vergleich der beiden Listen
+gibt die manuelle Korrektur pro Deckplatte.
+
+Reihenfolge: paarweise je Bandscheibe, Unterkante des oberen Wirbels (`INF`) gefolgt von der
+Oberkante des unteren (`SUP`). Ein Bandscheibenfach, für das eine der beiden Linien fehlt, wird
+ausgelassen — die Liste ist daher immer geradzahlig, aber nicht lückenlos über `vertebra_range`.
+
+Quelle: `POST /api/suggestnodes/` (`endplates`), dasselbe Modell und derselbe Request wie für
+`suggestedNodes`.
+
+#### 7.4.4 `calibrationLine` – Kalibrierungslinie
 
 ```json
 {
@@ -514,6 +532,7 @@ ImageData[]
                 ├── vertebra_range: [int, int]
                 ├── nodes[]: { x, y, fill, type, radius }
                 ├── suggestedNodes[]: { x, y, fill, type, radius } | null
-                ├── cobbLines[]: { x1, x2, y1, y2 [, mode] }
+                ├── suggestedLines[]: { x1, x2, y1, y2, mode } | null
+                ├── cobbLines[]: { x1, x2, y1, y2 [, mode] [, src] }
                 └── calibrationLine: { x1, x2, y1, y2 }
 ```
