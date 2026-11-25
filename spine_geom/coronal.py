@@ -36,7 +36,7 @@ def tilts_discrete(centroids: dict) -> dict[str, float]:
 def tilts_spline(centroids_wkd: dict, lam: float = SMOOTH_LAMBDA) -> dict[str, float]:
     """Methode (b): natürlicher kubischer Glättungsspline x(y) mit festem λ, Neigung aus dx/dy."""
     labels, p = _ordered(centroids_wkd)
-    if len(labels) < 4 or np.any(np.diff(p[:, 1]) >= 0):   # braucht kraniokaudale Monotonie
+    if len(labels) < 5 or np.any(np.diff(p[:, 1]) >= 0):   # scipy braucht ≥ 5 Punkte; kraniokaudale Monotonie
         return {}
     y, x = p[::-1, 1], p[::-1, 0]                   # aufsteigendes y für scipy
     spl = make_smoothing_spline(y, x, lam=lam)

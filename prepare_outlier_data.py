@@ -43,7 +43,7 @@ def fetch_data(token: str) -> pd.DataFrame:
         url=f"{API_URL}/api/imagedata/",
         headers={"Authorization": f"Bearer {token}"},
         params={"detailed": True, "complete": True},
-        timeout=120,
+        timeout=(10, 600),   # Antwort > 40 MB, Server braucht inzwischen > 2 min
     ).json()
     df = pd.DataFrame(response)
     print(f"  {len(df)} images, {df['measure_dataset'].map(len).sum()} measurements total")

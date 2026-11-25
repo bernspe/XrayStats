@@ -20,6 +20,7 @@ from annotation_analysis import (
     REGIONAL_COBB_TYPES, SEGMENTAL_COBB_TYPES, LUMBAR_SEGMENT_PAIRS,
 )
 from bspline_python import convertMeasurementBorderToSpineRegion
+import annotation_analysis as aa
 
 DATA_DIR = "data"
 
@@ -27,22 +28,35 @@ DIMS = {
     "cobbType":    "Cobb-Typ",
     "img_type":    "Bildtyp",
     "rater_name":  "User/Rater",
-    "main_region": "Hauptregion (CT/PT/MT/TL/U-LU/L-LU)",
+    "main_region": "Hauptregion (a.p.: CT/PT/MT/TL/U-LU/L-LU, seitlich: TK/TL/LL)",
 }
 ICC_BREAKDOWN_OPTIONS = {"(keine)": None, "Bildtyp": "img_type"}
 SIGMA_OPTIONS = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
-REGION_ORDER = ["CT", "PT", "MT", "TL", "U-LU", "L-LU", "LU"]
+REGION_ORDER = ["CT", "PT", "MT", "TK", "TL", "U-LU", "L-LU", "LU", "LL"]
+# Lateral films: an angle whose borders sit on a sagittal span is that span — the
+# same tolerances lateral_regional_angles uses for a single drawn pair.
+_LATERAL_BORDERS = {"TK": (aa._TK_UPPER, aa._TK_LOWER), "TL": (aa._TL_UPPER, aa._TL_LOWER),
+                    "LL": (aa._LL_UPPER, aa._LL_LOWER)}
 COMPARE_COBBS = ["Cobb-regional", "Cobb-segmental", "Spline", "reconstructed_regional", "reconstructed_segmental"]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _main_region(row) -> str:
+    if aa.is_lateral(row.get("img_type")):
+        for name, (upper, lower) in _LATERAL_BORDERS.items():
+            if row["vertebra_upper"] in upper and row["vertebra_lower"] in lower:
+                return name
+    # ponytail: lateral angles off the spans (reconstructed inflection segments) keep their a.p. region
+    # a.p.: the apex region build_angles_df computed from the nodes; rows without it
+    # (an outlier_angles_df.pkl older than prepare_outlier_data.py's apex rule) fall back to the midpoint
+    if isinstance(row.get("region"), str):
+        return row["region"]
     try:
         return convertMeasurementBorderToSpineRegion(
             row["vertebra_upper"].strip(), row["vertebra_lower"].strip()
-        )
-    except (ValueError, AttributeError):
+        ) or "?"
+    except AttributeError:
         return "?"
 
 

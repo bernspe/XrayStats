@@ -56,7 +56,7 @@ GROSS_DEV_WKD, GROSS_DEV_DEG = 0.5, 15.0
 # genauso aus). Maßstabsfehler σ_s nur aus Aufnahmen desselben Tages.
 CALIB_MAX_DEV = 0.15
 MIN_SCALE_PAIRS = 10
-RAW_COLS = ['id', 'm_uuid', 'img', 'patient_id', 'referring_patient', 'img_type', 'acquisition_date',
+RAW_COLS = ['id', 'uuid', 'm_uuid', 'img', 'patient_id', 'referring_patient', 'img_type', 'acquisition_date',
             'rater_id', 'rater_name', 'xray_measurement_data', 'label_shift_corrected']
 
 

@@ -43,16 +43,8 @@ from bspline_python import (
     calculate_angle,
     NodeItem,
     spine_labels,
-    spine_regions,
     convertMeasurementBorderToSpineRegion,
 )
-
-# Pre-built mapping: vertebra label -> spine region name
-label_to_region: dict[str, str] = {}
-for _region, (_start, _end) in spine_regions.items():
-    for _i in range(_start, _end + 1):
-        if _i < len(spine_labels):
-            label_to_region[spine_labels[_i]] = _region
 
 # CobbType classification — drives ICC grouping strategy
 REGIONAL_COBB_TYPES: set[str] = {"Cobb-regional", "Spline", "reconstructed_regional"}
@@ -630,10 +622,10 @@ def build_vertebra_range_df(df4d_source: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _safe_region(upper: str, lower: str) -> str | None:
+def _safe_region(upper: str, lower: str, state: dict | None = None) -> str | None:
     """Wrapper around convertMeasurementBorderToSpineRegion that returns None on bad labels."""
     try:
-        return convertMeasurementBorderToSpineRegion(upper, lower)
+        return convertMeasurementBorderToSpineRegion(upper, lower, state)
     except (ValueError, Exception):
         return None
 
@@ -682,20 +674,29 @@ def compute_icc_by_region(
     return pd.DataFrame(rows)
 
 
-# Lateral views report TK/LL composed across the spline's inflection segments.
-# Mirrors isLateralImgType / lateralRegionalAngles in the frontend's
-# src/helpers/analysisUtils.ts — the ICC must measure what AngleTable shows.
+# Lateral views report the sagittal profile: TK (T4-T12), TL (T10-L2, the
+# thoracolumbar junction — same name as the a.p. region, different span) and LL
+# (L1-S1). The browser stores the Spline at exactly these vertebrae on lateral
+# films; drawn Cobb pairs are matched with a tolerance. Mirrors isLateralImgType /
+# lateralRegionalAngles in the frontend's src/helpers/analysisUtils.ts — the ICC
+# must measure what AngleTable shows.
 _LATERAL_RE = re.compile(r'lat|sag|incl|recl')
+LATERAL_REGIONS = ('TK', 'TL', 'LL')
 _BORDER_TOLERANCE = 2
 
 
-def _borders_around(target: str) -> list[str]:
+def is_lateral(img_type: str | None) -> bool:
+    return bool(_LATERAL_RE.search(img_type or ''))
+
+
+def _borders_around(target: str, tolerance: int = _BORDER_TOLERANCE) -> list[str]:
     t = spine_labels.index(target)
-    near = [l for i, l in enumerate(spine_labels) if abs(i - t) <= _BORDER_TOLERANCE]
+    near = [l for i, l in enumerate(spine_labels) if abs(i - t) <= tolerance]
     return sorted(near, key=lambda l: (abs(spine_labels.index(l) - t), -spine_labels.index(l)))
 
 
-_TK_UPPER, _TK_LOWER = ['T4', 'T3'], _borders_around('T12')
+_TK_UPPER, _TK_LOWER = _borders_around('T4', 1), _borders_around('T12')
+_TL_UPPER, _TL_LOWER = _borders_around('T10', 1), _borders_around('L2', 1)
 _LL_UPPER, _LL_LOWER = _borders_around('T12'), _borders_around('S1')
 
 
@@ -732,15 +733,19 @@ def _compose_span(segs: list[dict], upper: list[str], lower: list[str]) -> dict 
 
 
 def lateral_regional_angles(angles: list[dict], cobb_type: str) -> dict[str, dict]:
-    """{'TK': span, 'LL': span} for one cobbType — whichever the measurement covers.
-    LL goes negative only when it bends the same way as TK (lumbar kyphosis)."""
+    """{'TK': span, 'TL': span, 'LL': span} for one cobbType — whichever the
+    measurement covers. LL goes negative only when it bends the same way as TK
+    (lumbar kyphosis), TL only when it bends the other way (junctional lordosis)."""
     segs = [a for a in angles if a.get('cobbType') == cobb_type]
     tk = _compose_span(segs, _TK_UPPER, _TK_LOWER)
+    tl = _compose_span(segs, _TL_UPPER, _TL_LOWER)
     ll = _compose_span(segs, _LL_UPPER, _LL_LOWER)
-    if tk and ll and np.sign(_signed_angle(tk['upperLine'], tk['lowerLine'])) == \
-            np.sign(_signed_angle(ll['upperLine'], ll['lowerLine'])):
+    bend = lambda m: np.sign(_signed_angle(m['upperLine'], m['lowerLine']))
+    if tk and ll and bend(tk) == bend(ll):
         ll['angle'] = -ll['angle']
-    return {k: v for k, v in (('TK', tk), ('LL', ll)) if v}
+    if tk and tl and tl['angle'] and bend(tk) != bend(tl):
+        tl['angle'] = -tl['angle']
+    return {k: v for k, v in zip(LATERAL_REGIONS, (tk, tl, ll)) if v}
 
 
 def build_angles_df(
@@ -756,8 +761,9 @@ def build_angles_df(
     smooth_sigma > 0 applies Gaussian node smoothing before B-spline fitting for
     reconstructed and inflection angles (API-native angles are never modified).
 
-    lateral_spans: cobbTypes for which lateral img_types get one extra row each for
-    the composed TK/LL span (region 'TK'/'LL'); Port aus xray_api/api/helpers/annotation_analysis.py.
+    lateral_spans: cobbTypes for which lateral img_types report the composed
+    TK/TL/LL spans (region 'TK'/'TL'/'LL') *instead of* their own rows — a lateral
+    film has no MT or a.p. TL. Port aus xray_api/api/helpers/annotation_analysis.py.
     """
     rows = []
     for _, row in df4d_source.iterrows():
@@ -774,7 +780,10 @@ def build_angles_df(
             all_angles += getReconstructedCobbAngles(xmd, smooth_sigma=smooth_sigma)
         if include_inflection:
             all_angles += getInflectionCobbAngles(xmd, min_angle=min_inflection_angle, smooth_sigma=smooth_sigma)
+        spans_here = lateral_spans if is_lateral(row["img_type"]) else ()
         for angle in all_angles:
+            if angle.get("cobbType") in spans_here:
+                continue
             ca = angle.get("cobbAngle", {})
             rows.append({
                 "image_id": row["id"],
@@ -784,11 +793,11 @@ def build_angles_df(
                 "cobbType": angle.get("cobbType", ""),
                 "vertebra_upper": ca.get("vertebra_upper", ""),
                 "vertebra_lower": ca.get("vertebra_lower", ""),
-                "region": _safe_region(ca.get("vertebra_upper", ""), ca.get("vertebra_lower", "")),
+                "region": _safe_region(ca.get("vertebra_upper", ""), ca.get("vertebra_lower", ""), xmd.get("stateObject")),
                 "angle": ca.get("angle", None),
             })
-        if lateral_spans and _LATERAL_RE.search(row["img_type"] or ""):
-            for ct in lateral_spans:
+        if spans_here:
+            for ct in spans_here:
                 for region, span in lateral_regional_angles(all_angles, ct).items():
                     rows.append({
                         "image_id": row["id"], "img_type": row["img_type"],

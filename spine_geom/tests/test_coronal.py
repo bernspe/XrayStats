@@ -104,3 +104,8 @@ def test_coronal_shape_frame():
         s = coronal_shape(c, 1, c['S1'], d, 40.0)
         assert np.allclose(s['S1'], [0, 0]) and np.allclose(s['L5'], [0, 1.0]) and np.allclose(s['L4'], [0.5, 2.0])
     assert coronal_shape(c, 1, None, direction, 40.0) == {}
+
+
+def test_spline_needs_five_points():
+    c = {k: (0.1 * i, -float(i)) for i, k in enumerate(['L1', 'L2', 'L3', 'L4'])}
+    assert tilts_spline(c) == {}                     # scipy make_smoothing_spline: mind. 5 Punkte

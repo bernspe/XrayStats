@@ -33,7 +33,7 @@ import requests
 import streamlit as st
 from PIL import Image
 
-from annotation_analysis import build_angles_df
+from annotation_analysis import build_angles_df, is_lateral
 from prepare_outlier_data import fetch_img_urls
 
 DATA_DIR = "data"
@@ -53,6 +53,15 @@ SVG_FILES = {
 # and bspline_python.spine_regions for the underlying vertebra ranges). "LU" (whole lumbar
 # lordosis) only exists as an element in the lateral SVG; harmless no-op lookup for ap.
 REGION_IDS = {"MT": "mt", "TL": "tl", "U-LU": "u-lu", "L-LU": "l-lu", "LU": "lu"}
+# Lateral films report the sagittal profile TK (T4-T12), TL (T10-L2, the
+# thoracolumbar junction) and LL (L1-S1). ponytail: the lateral SVG has no tk/ll
+# markers, so TK reuses the mt arc (T5-T11) and LL the lu arc (L1-S1, exact).
+LATERAL_REGION_IDS = {"TK": "mt", "TL": "tl", "LL": "lu"}
+
+
+def region_ids_for(img_type: str) -> dict:
+    return LATERAL_REGION_IDS if is_lateral(img_type) else REGION_IDS
+
 SEGMENT_IDS = {"L1/L2": "l1-l2", "L2/L3": "l2-l3", "L3/L4": "l3-l4", "L4/L5": "l4-l5", "L5/S1": "l5-s1"}
 
 # Diverging good/bad gradient (not absolute severity): a change is colour-coded by whether
@@ -70,15 +79,15 @@ TREND_SCALE_DEG = 5.0  # degrees *beyond* the significance threshold for full co
 # ponytail: fixed thresholds/scale, not calibrated against real MDC (minimal detectable
 # change) literature — tune if colours saturate too eagerly/rarely in practice.
 
-LATERAL_BAD_ON_INCREASE = {"MT", "TL"}  # thoracic kyphosis: more curvature = worse
+LATERAL_BAD_ON_INCREASE = {"TK", "TL"}  # more kyphosis = worse
 
 
 def trend_direction(img_type: str, label: str) -> int:
     """+1 if an *increase* in this label's angle is clinically favourable, else -1.
 
     a.p. (scoliosis): any increase is worse, everywhere.
-    lateral (sagittal profile): more lumbar lordosis (U-LU/L-LU/LU and the lumbar
-    segmental angles) is favourable; more thoracic kyphosis (MT/TL) is not.
+    lateral (sagittal profile): more lumbar lordosis (LL and the lumbar segmental
+    angles) is favourable; more kyphosis (TK, junctional TL) is not.
     """
     if img_type == "Xray-LWS-ap":
         return -1
@@ -104,7 +113,8 @@ def trend_color(delta: float | None, direction: int, significance: float,
 @st.cache_resource
 def load_angles() -> pd.DataFrame:
     df4d = pd.read_pickle(f"{DATA_DIR}/df4d_corrected_spine_measurements.pkl")
-    angles = build_angles_df(df4d)
+    # lateral films: TK/TL/LL spans instead of the a.p. apex regions
+    angles = build_angles_df(df4d, lateral_spans=tuple(REGIONAL_COBB_TYPES))
     meta = df4d[["id", "patient_id", "acquisition_date"]].drop_duplicates("id")
     angles = angles.merge(meta, left_on="image_id", right_on="id", how="left")
     angles["acquisition_date"] = pd.to_datetime(angles["acquisition_date"], errors="coerce")
@@ -326,12 +336,13 @@ def render_spine_icon(svg_path: Path, label_series: dict, img_type: str,
     # invisible hover targets below so hover stays usable at that scale.
     parent_map = {child: parent for parent in root.iter() for child in parent}
 
-    label_significance = {**{l: REGIONAL_SIGNIFICANCE_DEG for l in REGION_IDS},
+    region_ids = region_ids_for(img_type)
+    label_significance = {**{l: REGIONAL_SIGNIFICANCE_DEG for l in region_ids},
                            **{l: SEGMENTAL_SIGNIFICANCE_DEG for l in SEGMENT_IDS}}
 
     trend_dir = {}
     trend_sig = {}
-    for label, eid in {**REGION_IDS, **SEGMENT_IDS}.items():
+    for label, eid in {**region_ids, **SEGMENT_IDS}.items():
         el = root.find(f".//*[@id='{eid}']")
         if el is None:
             continue
@@ -497,7 +508,7 @@ def render_patient_row(img_label: str, img_type: str, patient_id: str,
     panel_gap = 8
     panel_height = (ICON_MAX_HEIGHT_PX - panel_gap) // 2
     chart_html = (
-        render_chart_panel(stats_by_label, list(REGION_IDS.keys()), "Regionale Winkel",
+        render_chart_panel(stats_by_label, list(region_ids_for(img_type)), "Regionale Winkel",
                             width=220, height=panel_height)
         + render_chart_panel(stats_by_label, list(SEGMENT_IDS.keys()), "Segmentale Winkel",
                               width=220, height=panel_height)

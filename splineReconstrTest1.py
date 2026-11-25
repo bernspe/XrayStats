@@ -56,7 +56,7 @@ def COBB_angles_spline_reconstruction(m):
         cobb_angles = generate_COBB_angles_from_tangents(tangents, mapped, perp_lines, mode='regional_S1',angle_threshold=threshold)
 
         for angle_info in cobb_angles:
-            region = convertMeasurementBorderToSpineRegion(angle_info['from_label'], angle_info['to_label'])
+            region = convertMeasurementBorderToSpineRegion(angle_info['from_label'], angle_info['to_label'], m['stateObject'])
             if region not in result:
                 result[region] = [angle_info]
             else:

@@ -18,6 +18,7 @@ from scipy import stats
 import matplotlib.pyplot as plt
 
 from bspline_python import spine_labels, convertMeasurementBorderToSpineRegion
+from annotation_analysis import is_lateral, lateral_regional_angles
 
 warnings.filterwarnings("ignore")
 
@@ -33,7 +34,7 @@ DEFAULT_PAIRS = [
 
 COBB_TYPES = ["Spline", "Cobb-regional", "Cobb-segmental"]
 
-REGIONAL_REGIONS = ["MT", "TL", "U-LU", "L-LU", "LU"]
+REGIONAL_REGIONS = ["MT", "TK", "TL", "U-LU", "L-LU", "LU", "LL"]
 SEGMENTAL_REGIONS = ["T11/T12", "T12/L1", "L1/L2", "L2/L3", "L3/L4", "L4/L5", "L5/S1"]
 
 # Segmental pairs as (upper, lower) for lookup
@@ -44,7 +45,7 @@ _SEG_PAIRS: dict[tuple[str, str], str] = {
 }
 
 
-def angle_region(upper: str, lower: str, cobb_type: str) -> str | None:
+def angle_region(upper: str, lower: str, cobb_type: str, state: dict | None = None) -> str | None:
     """Map (vertebra_upper, vertebra_lower, cobbType) to a display region label."""
     if "segmental" in cobb_type.lower():
         return _SEG_PAIRS.get((upper, lower), f"{upper}/{lower}")
@@ -57,7 +58,7 @@ def angle_region(upper: str, lower: str, cobb_type: str) -> str | None:
     if up_idx <= 20 and lo_idx >= 25:  # L1 or higher → S1: full lumbar lordosis
         return "LU"
     try:
-        return convertMeasurementBorderToSpineRegion(upper, lower)
+        return convertMeasurementBorderToSpineRegion(upper, lower, state)
     except Exception:
         return None
 
@@ -96,9 +97,22 @@ def load_cache() -> list[dict] | None:
 def extract_angles_from_image(image: dict) -> list[dict]:
     """Returns list of {cobbType, region, vertebra_upper, vertebra_lower, angle} per rater."""
     rows = []
+    # lateral films: the regional angles as their TK/TL/LL spans, like AngleTable
+    lateral = is_lateral(image.get("img_type"))
     for md in image.get("measure_dataset", []):
         xmd = (md.get("data") or {}).get("xray_measurement_data") or {}
-        for a in xmd.get("angles", []):
+        rater = (md.get("user") or {}).get("username", "")
+        angles = xmd.get("angles", [])
+        if lateral:
+            for ct in COBB_TYPES:
+                if "segmental" in ct:
+                    continue
+                for region, span in lateral_regional_angles(angles, ct).items():
+                    rows.append({"cobbType": ct, "region": region, "vertebra_upper": span["vertebra_upper"],
+                                 "vertebra_lower": span["vertebra_lower"], "angle": float(span["angle"]), "rater": rater})
+        for a in angles:
+            if lateral and "segmental" not in a.get("cobbType", ""):
+                continue
             ca = a.get("cobbAngle", {})
             angle_val = ca.get("angle")
             if angle_val is None:
@@ -108,11 +122,11 @@ def extract_angles_from_image(image: dict) -> list[dict]:
             lower = ca.get("vertebra_lower", "")
             rows.append({
                 "cobbType": ct,
-                "region": angle_region(upper, lower, ct),
+                "region": angle_region(upper, lower, ct, xmd.get("stateObject")),
                 "vertebra_upper": upper,
                 "vertebra_lower": lower,
                 "angle": float(angle_val),
-                "rater": (md.get("user") or {}).get("username", ""),
+                "rater": rater,
             })
     return rows
 

@@ -532,24 +532,43 @@ def map_nodes_to_spline_and_keys(
     
     return result
 
-def convertMeasurementBorderToSpineRegion(upper_vertebra, lower_vertebra):
-    # returns the spine region whose given range is most contained (compared to the other regions) in the range given by upper and lower vertebra
-    # convert upper and lower vertebra labels to indices
-    upper_vertebra_idx = spine_labels.index(upper_vertebra)
-    try:
-        lower_vertebra_idx = spine_labels.index(lower_vertebra)
-    except ValueError:
-        lower_vertebra_idx = len(spine_labels) - 1
-    max_overlap = 0
-    selected_region = None
-    for region, (start_idx, end_idx) in spine_regions.items():
-        overlap_start = max(upper_vertebra_idx, start_idx)
-        overlap_end = min(lower_vertebra_idx, end_idx)
-        overlap = max(0, overlap_end - overlap_start + 1)
-        if overlap > max_overlap:
-            max_overlap = overlap
-            selected_region = region
-    return selected_region
+def apex_index(upper_idx: int, lower_idx: int, state: Optional[dict] = None) -> int:
+    """Label index of a curve's apical vertebra: the node between the two end
+    vertebrae farthest from their chord. Without both end nodes and a deviating node
+    in between, the midpoint, rounded caudally. *state* is the measurement's
+    stateObject (node i carries label spine_labels[vertebra_range[0] + i]).
+    Same rule as apexIndex in the frontend's helpers/analysisUtils.ts (xray-annotator; copy of xray_api/api/helpers/bspline_python.py) — AngleTable,
+    the ICC and the performance badges must agree on what "TL" is."""
+    apex = (upper_idx + lower_idx + 1) // 2
+    state = state or {}
+    nodes, vr = state.get('nodes') or [], state.get('vertebra_range')
+    if not vr:
+        return apex
+    at = lambda i: nodes[i - vr[0]] if 0 <= i - vr[0] < len(nodes) else None
+    a, b = at(upper_idx), at(lower_idx)
+    if a is None or b is None:
+        return apex
+    best = 0.0
+    for i in range(upper_idx + 1, lower_idx):
+        n = at(i)
+        if n is None:
+            continue
+        # distance from the chord a→b, up to the constant factor |a→b|
+        d = abs((b['x'] - a['x']) * (n['y'] - a['y']) - (b['y'] - a['y']) * (n['x'] - a['x']))
+        if d > best:
+            best, apex = d, i
+    return apex
+
+
+def convertMeasurementBorderToSpineRegion(upper_vertebra, lower_vertebra, state: Optional[dict] = None):
+    """a.p. region of a regional measurement by its apex (apex_index). Overlapping
+    borders (L1 in TL and U-LU, L3 in U-LU and L-LU) go to the upper region. None
+    for unknown labels. Replaced a max-overlap rule that sent every long lumbar
+    curve to TL (tie with U-LU, first wins) and every curve reaching T8 to MT."""
+    if upper_vertebra not in spine_labels or lower_vertebra not in spine_labels:
+        return None
+    apex = apex_index(spine_labels.index(upper_vertebra), spine_labels.index(lower_vertebra), state)
+    return next((r for r, (s, e) in spine_regions.items() if s <= apex <= e), None)
 
 def get_closest_node_idx_from_y(nodes: List[NodeItem], y: Optional[float]) -> int:
     """

@@ -4,29 +4,114 @@
     {
       "name": "subluxation_app",
       "runtimeExecutable": "/Users/peterbernstein/Python/ICFXStats/venv/bin/streamlit",
-      "runtimeArgs": ["run", "subluxation_app.py", "--server.headless", "true", "--server.port", "8765"],
+      "runtimeArgs": [
+        "run",
+        "subluxation_app.py",
+        "--server.headless",
+        "true",
+        "--server.port",
+        "8765"
+      ],
       "port": 8765,
       "autoPort": false
     },
     {
       "name": "patient_timecourse_app",
       "runtimeExecutable": "/Users/peterbernstein/Python/ICFXStats/venv/bin/streamlit",
-      "runtimeArgs": ["run", "patient_timecourse_app.py", "--server.headless", "true", "--server.port", "8766"],
+      "runtimeArgs": [
+        "run",
+        "patient_timecourse_app.py",
+        "--server.headless",
+        "true",
+        "--server.port",
+        "8766"
+      ],
       "port": 8766,
       "autoPort": false
     },
     {
       "name": "degen_scoliosis_app",
       "runtimeExecutable": "/Users/peterbernstein/Python/ICFXStats/venv/bin/streamlit",
-      "runtimeArgs": ["run", "degen_scoliosis_app.py", "--server.headless", "true", "--server.port", "8767"],
+      "runtimeArgs": [
+        "run",
+        "degen_scoliosis_app.py",
+        "--server.headless",
+        "true",
+        "--server.port",
+        "8767"
+      ],
       "port": 8767,
+      "autoPort": false
+    },
+    {
+      "name": "corner_annotate_app",
+      "runtimeExecutable": "/Users/peterbernstein/Python/ICFXStats/venv/bin/streamlit",
+      "runtimeArgs": [
+        "run",
+        "corner_annotate_app.py",
+        "--server.headless",
+        "true",
+        "--server.port",
+        "8768"
+      ],
+      "port": 8768,
       "autoPort": false
     },
     {
       "name": "xray-annotator-dev",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "/Users/peterbernstein/Vue/xray-annotator", "run", "dev", "--", "--port", "5180"],
+      "runtimeArgs": [
+        "--prefix",
+        "/Users/peterbernstein/Vue/xray-annotator",
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "5180"
+      ],
       "port": 5180,
+      "autoPort": false
+    },
+    {
+      "name": "image_groups_explorer_app",
+      "runtimeExecutable": "/Users/peterbernstein/Python/ICFXStats/venv/bin/streamlit",
+      "runtimeArgs": [
+        "run",
+        "image_groups_explorer_app.py",
+        "--server.headless",
+        "true",
+        "--server.port",
+        "8769"
+      ],
+      "port": 8769,
+      "autoPort": false
+    },
+    {
+      "name": "letter2entry_review_app",
+      "runtimeExecutable": "/Users/peterbernstein/Python/ICFXStats/venv/bin/streamlit",
+      "runtimeArgs": [
+        "run",
+        "letter2entry_claude/review_app.py",
+        "--server.headless",
+        "true",
+        "--server.port",
+        "8770"
+      ],
+      "port": 8770,
+      "autoPort": false
+    },
+    {
+      "name": "segmental_course_app",
+      "runtimeExecutable": "/Users/peterbernstein/Python/ICFXStats/venv/bin/streamlit",
+      "runtimeArgs": [
+        "run",
+        "segmental_course_app.py",
+        "--server.headless",
+        "true",
+        "--server.port",
+        "8771"
+      ],
+      "port": 8771,
       "autoPort": false
     }
   ]
